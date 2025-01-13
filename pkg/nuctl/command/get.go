@@ -86,7 +86,7 @@ func newGetFunctionCommandeer(ctx context.Context, getCommandeer *getCommandeer)
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -170,7 +170,7 @@ func newGetProjectCommandeer(ctx context.Context, getCommandeer *getCommandeer) 
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -250,7 +250,7 @@ func newGetAPIGatewayCommandeer(ctx context.Context, getCommandeer *getCommandee
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -275,6 +275,7 @@ func newGetAPIGatewayCommandeer(ctx context.Context, getCommandeer *getCommandee
 	}
 
 	cmd.PersistentFlags().StringVarP(&commandeer.output, "output", "o", common.OutputFormatText, "Output format - \"text\", \"wide\", \"yaml\", or \"json\"")
+	cmd.PersistentFlags().StringVar(&commandeer.getAPIGatewaysOptions.FunctionName, "function-name", "", "Function name to filter api gateways")
 
 	commandeer.cmd = cmd
 
@@ -326,7 +327,7 @@ func newGetFunctionEventCommandeer(ctx context.Context, getCommandeer *getComman
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
@@ -66,30 +67,86 @@ type Volume struct {
 
 // Trigger holds configuration for a trigger
 type Trigger struct {
-	Class                                 string            `json:"class"`
-	Kind                                  string            `json:"kind"`
-	Name                                  string            `json:"name"`
-	Disabled                              bool              `json:"disabled,omitempty"`
-	MaxWorkers                            int               `json:"maxWorkers,omitempty"`
-	URL                                   string            `json:"url,omitempty"`
-	Paths                                 []string          `json:"paths,omitempty"`
-	Username                              string            `json:"username,omitempty"`
-	Password                              string            `json:"password,omitempty"`
-	Secret                                string            `json:"secret,omitempty"`
-	Partitions                            []Partition       `json:"partitions,omitempty"`
-	Annotations                           map[string]string `json:"annotations,omitempty"`
-	WorkerAvailabilityTimeoutMilliseconds *int              `json:"workerAvailabilityTimeoutMilliseconds,omitempty"`
-	WorkerAllocatorName                   string            `json:"workerAllocatorName,omitempty"`
-	ExplicitAckMode                       ExplicitAckMode   `json:"explicitAckMode,omitempty"`
-	WaitExplicitAckDuringRebalanceTimeout string            `json:"waitExplicitAckDuringRebalanceTimeout,omitempty"`
-	WorkerTerminationTimeout              string            `json:"workerTerminationTimeout,omitempty"`
+	Class       string            `json:"class"`
+	Kind        string            `json:"kind"`
+	Name        string            `json:"name"`
+	Disabled    bool              `json:"disabled,omitempty"`
+	NumWorkers  int               `json:"numWorkers,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Paths       []string          `json:"paths,omitempty"`
+	Username    string            `json:"username,omitempty"`
+	Password    string            `json:"password,omitempty"`
+	Secret      string            `json:"secret,omitempty"`
+	Partitions  []Partition       `json:"partitions,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 
+	// TODO: move all these params to attributes for kafka trigger
+	WorkerTerminationTimeout              string          `json:"workerTerminationTimeout,omitempty"`
+	WorkerAvailabilityTimeoutMilliseconds *int            `json:"workerAvailabilityTimeoutMilliseconds,omitempty"`
+	WorkerAllocatorName                   string          `json:"workerAllocatorName,omitempty"`
+	ExplicitAckMode                       ExplicitAckMode `json:"explicitAckMode,omitempty"`
+	WaitExplicitAckDuringRebalanceTimeout string          `json:"waitExplicitAckDuringRebalanceTimeout,omitempty"`
+
+	Batch *BatchConfiguration `json:"batch,omitempty"`
 	// Dealer Information
 	TotalTasks        int `json:"total_tasks,omitempty"`
 	MaxTaskAllocation int `json:"max_task_allocation,omitempty"`
 
 	// General attributes
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
+
+	// Deprecated: MaxWorkers is replaced by NumWorkers, and will be removed in 1.15.x
+	// TODO: remove in 1.15.x
+	MaxWorkers int `json:"maxWorkers,omitempty"`
+}
+
+type BatchConfiguration struct {
+	Mode      BatchMode `json:"mode,omitempty"`
+	BatchSize int       `json:"batchSize,omitempty"`
+	Timeout   string    `json:"timeout,omitempty"`
+}
+
+type BatchMode string
+
+const (
+	BatchModeEnable  BatchMode = "enable"
+	BatchModeDisable BatchMode = "disable"
+
+	DefaultBatchSize    = 10
+	DefaultBatchTimeout = "1s"
+)
+
+func BatchModeEnabled(batchConfiguration *BatchConfiguration) bool {
+	if batchConfiguration == nil {
+		return false
+	}
+	return batchConfiguration.Mode == BatchModeEnable
+}
+
+var triggerKindsSupportBatching = []string{
+	"http",
+}
+
+var runtimesSupportBatching = []string{
+	"python",
+}
+
+func TriggerKindSupportsBatching(triggerKind string) bool {
+	for _, supportedKind := range triggerKindsSupportBatching {
+		if triggerKind == supportedKind {
+			return true
+		}
+	}
+	return false
+}
+
+func RuntimeSupportsBatching(runtime string) bool {
+	for _, supportedRuntime := range runtimesSupportBatching {
+		if strings.Contains(runtime, supportedRuntime) {
+			return true
+		}
+	}
+	return false
 }
 
 type ExplicitAckMode string
@@ -108,6 +165,17 @@ const (
 	// DefaultWorkerTerminationTimeout wait time for workers to drop or ack events before rebalance initiates
 	DefaultWorkerTerminationTimeout string = "10s"
 )
+
+var runtimesSupportingExplicitAck = []string{"python"}
+
+func RuntimeSupportExplicitAck(runtime string) bool {
+	for _, supportedRuntime := range runtimesSupportingExplicitAck {
+		if strings.HasPrefix(runtime, supportedRuntime) {
+			return true
+		}
+	}
+	return false
+}
 
 func ExplicitAckModeInSlice(ackMode ExplicitAckMode, ackModes []ExplicitAckMode) bool {
 	for _, mode := range ackModes {
@@ -229,17 +297,18 @@ func GetDefaultHTTPTrigger() Trigger {
 	return Trigger{
 		Kind:       "http",
 		Name:       "default-http",
-		MaxWorkers: 1,
+		NumWorkers: 1,
 	}
 }
 
 // Ingress holds configuration for an ingress - an entity that can route HTTP requests
 // to the function
 type Ingress struct {
-	Host     string                `json:"host,omitempty"`
-	Paths    []string              `json:"paths,omitempty"`
-	PathType networkingv1.PathType `json:"pathType,omitempty"`
-	TLS      IngressTLS            `json:"tls,omitempty"`
+	Host             string                `json:"host,omitempty"`
+	Paths            []string              `json:"paths,omitempty"`
+	PathType         networkingv1.PathType `json:"pathType,omitempty"`
+	TLS              IngressTLS            `json:"tls,omitempty"`
+	IngressClassName string                `json:"ingressClassName,omitempty"`
 }
 
 // IngressTLS holds configuration for an ingress's TLS
@@ -351,7 +420,6 @@ type Spec struct {
 	DealerURI               string                  `json:"dealerURI,omitempty"`
 	Platform                Platform                `json:"platform,omitempty"`
 	ReadinessTimeoutSeconds int                     `json:"readinessTimeoutSeconds,omitempty"`
-	Avatar                  string                  `json:"avatar,omitempty"`
 	ServiceType             v1.ServiceType          `json:"serviceType,omitempty"`
 	ImagePullPolicy         v1.PullPolicy           `json:"imagePullPolicy,omitempty"`
 	SecurityContext         *v1.PodSecurityContext  `json:"securityContext,omitempty"`
@@ -573,6 +641,13 @@ func ShouldSkipBuild(annotations map[string]string) bool {
 type Config struct {
 	Meta Meta `json:"metadata,omitempty"`
 	Spec Spec `json:"spec,omitempty"`
+}
+
+func GetFunctionConfigFromInterface(functionConfigInterface interface{}) *Config {
+	if functionConfig, ok := functionConfigInterface.(*Config); ok {
+		return functionConfig
+	}
+	return nil
 }
 
 // NewConfig creates a new configuration structure
@@ -870,6 +945,9 @@ type Status struct {
 	// list of external urls, containing ingresses and external-ip:function-port
 	// e.g.: [ my-function.some-domain.com/pathA, other-ingress.some-domain.co, 1.2.3.4:3000 ]
 	ExternalInvocationURLs []string `json:"externalInvocationUrls,omitempty"`
+
+	// node selector from function config enriched with project's and platform node selectors
+	EnrichedNodeSelector map[string]string `json:"enrichedNodeSelector,omitempty"`
 }
 
 func (s *Status) InvocationURLs() []string {
@@ -893,3 +971,5 @@ type ConfigWithStatus struct {
 	Config `json:",inline" yaml:",inline"`
 	Status Status `json:"status,omitempty"`
 }
+
+var FixableValidationErrors = []string{"V3IO Stream trigger does not support autoscaling"}

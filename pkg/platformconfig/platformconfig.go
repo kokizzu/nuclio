@@ -150,6 +150,10 @@ func NewPlatformConfig(configurationPath string) (*Config, error) {
 		config.StreamMonitoring.V3ioRequestConcurrency = DefaultV3ioRequestConcurrency
 	}
 
+	if config.Kube.DefaultHTTPIngressClassName == "" {
+		config.Kube.DefaultHTTPIngressClassName = DefaultHTTPIngressClassName
+	}
+
 	functionReadinessTimeout, err := time.ParseDuration(*config.FunctionReadinessTimeout)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to parse function readiness timeout")
@@ -379,7 +383,7 @@ func (c *Config) enrichContainerResources(ctx context.Context,
 
 	logger.DebugWithCtx(ctx,
 		"Populated resources with default values",
-		"resources", resources)
+		"resources", resources.String())
 }
 
 func (c *Config) getMetricSinks(metricSinkNames []string) (map[string]MetricSink, error) {

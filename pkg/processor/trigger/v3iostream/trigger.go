@@ -192,7 +192,12 @@ func (vs *v3iostream) ConsumeClaim(session streamconsumergroup.Session, claim st
 			return errors.Wrap(err, "Failed to subscribe to explicit ack control messages")
 		}
 
-		go vs.explicitAckHandler(explicitAckControlMessageChan, commitRecordFuncHandler)
+		go vs.explicitAckHandler(
+			explicitAckControlMessageChan,
+			commitRecordFuncHandler,
+			claim.GetShardID(),
+			claim.GetStreamPath(),
+		)
 	}
 
 	// the exit condition is that (a) the Messages() channel was closed and (b) we got a signal telling us
@@ -208,6 +213,7 @@ func (vs *v3iostream) ConsumeClaim(session streamconsumergroup.Session, claim st
 			}
 
 			submittedEventInstance.event.record = record
+			submittedEventInstance.event.StreamPath = claim.GetStreamPath()
 			submittedEventInstance.worker = workerInstance
 
 			// handle in the goroutine so we don't block
@@ -232,8 +238,10 @@ func (vs *v3iostream) ConsumeClaim(session streamconsumergroup.Session, claim st
 	vs.Logger.DebugWith("Claim consumption stopped", "shardID", claim.GetShardID())
 
 	// unsubscribe channel from the streamAck control message kind before closing it
-	if err := vs.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
-		vs.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+	if functionconfig.ExplicitAckEnabled(vs.configuration.ExplicitAckMode) {
+		if err := vs.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
+			vs.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+		}
 	}
 
 	// shut down the event submitter and the explicit ack handler
@@ -419,14 +427,15 @@ func (vs *v3iostream) resolveCommitRecordFuncHandler(session streamconsumergroup
 	return commitRecordDefaultFuncHandler
 }
 
-func (vs *v3iostream) explicitAckHandler(controlMessageChan chan *controlcommunication.ControlMessage,
-	commitRecordFuncHandler func(*v3io.StreamRecord)) {
+func (vs *v3iostream) explicitAckHandler(
+	controlMessageChan chan *controlcommunication.ControlMessage,
+	commitRecordFuncHandler func(*v3io.StreamRecord),
+	claimShardId int,
+	claimStreamPath string) {
 
 	vs.Logger.DebugWith("Listening for explicit ack control messages")
 
 	for streamAckControlMessage := range controlMessageChan {
-
-		vs.Logger.DebugWith("Received explicit ack control message", "controlMessage", streamAckControlMessage)
 
 		// retrieve attributes from control message
 		explicitAckAttributes := &controlcommunication.ControlMessageAttributesExplicitAck{}
@@ -441,9 +450,31 @@ func (vs *v3iostream) explicitAckHandler(controlMessageChan chan *controlcommuni
 		// to determine which shard/sequence number to mark.
 		shardID := int(explicitAckAttributes.Partition)
 
+		// skip the message if it is not for this shardId
+		if claimShardId != shardID {
+			continue
+		}
+
+		// we check for stream to be equal to "/" to keep BC with mlrun < 1.7.0
+		// where instead of passing a streamPath, "/" is passed
+		// TODO: deprecate the check for "/" in 1.16.0
+		if explicitAckAttributes.Topic != "/" && (explicitAckAttributes.Topic != claimStreamPath) {
+			continue
+		}
+
 		record := &v3io.StreamRecord{
 			ShardID:        &shardID,
 			SequenceNumber: uint64(explicitAckAttributes.Offset),
+		}
+
+		// this log is mostly for development purposes, to see that we are actually marking the offset
+		// to enable it use the "nuclio.io/v3iostream-log-level" annotation
+		if vs.configuration.LogLevel > 5 {
+			vs.Logger.InfoWith("Marking offset on explicit ack request",
+				"streamPath", claimStreamPath,
+				"explicitAckMessageTopic", explicitAckAttributes.Topic,
+				"shardId", shardID,
+				"offset", record.SequenceNumber)
 		}
 
 		// commit record

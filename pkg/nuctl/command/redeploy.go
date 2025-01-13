@@ -75,7 +75,7 @@ Arguments:
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// initialize root
-			if err := rootCommandeer.initialize(); err != nil {
+			if err := rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 			if err := commandeer.betaCommandeer.initialize(); err != nil {
@@ -202,10 +202,10 @@ func (d *redeployCommandeer) redeployFunctions(ctx context.Context, functionName
 	patchErrGroup, _ := errgroup.WithContextSemaphore(ctx, d.rootCommandeer.loggerInstance, uint(d.rootCommandeer.concurrency))
 	for _, function := range functionNames {
 		function := function
-		patchErrGroup.Go("patch function", func() error {
+		patchErrGroup.Go("redeploy function", func() error {
 			if err := d.patchFunction(ctx, function, d.desiredState); err != nil {
 				d.outputManifest.AddFailure(function, err, d.isRedeploymentRetryable(err))
-				return errors.Wrap(err, "Failed to patch function")
+				return errors.Wrap(err, "Failed to redeploy function")
 			}
 			d.outputManifest.AddSuccess(function)
 			return nil
@@ -216,12 +216,16 @@ func (d *redeployCommandeer) redeployFunctions(ctx context.Context, functionName
 
 		// Functions that failed to patch are included in the output manifest,
 		// so we don't need to fail the entire operation here
-		d.rootCommandeer.loggerInstance.WarnWithCtx(ctx, "Failed to patch functions", "err", err)
+		d.rootCommandeer.loggerInstance.WarnWithCtx(ctx, "Failed to redeploy functions", "err", err)
 	}
 
 	d.outputManifest.LogOutput(ctx, d.rootCommandeer.loggerInstance)
 	if d.saveReport {
 		d.outputManifest.SaveToFile(ctx, d.rootCommandeer.loggerInstance, d.reportFilePath)
+	}
+
+	if errorString := d.outputManifest.SprintfError(); errorString != "" {
+		return errors.New(errorString)
 	}
 
 	return nil
@@ -254,7 +258,8 @@ func (d *redeployCommandeer) patchFunction(ctx context.Context, functionName str
 		requestHeaders); err != nil {
 		switch typedError := err.(type) {
 		case *nuclio.ErrorWithStatusCode:
-			return nuclio.GetWrapByStatusCode(typedError.StatusCode())(errors.Wrap(err, "Failed to patch function"))
+			// wrap it again with the status code to communicate if it is retryable
+			return nuclio.GetWrapByStatusCode(typedError.StatusCode())(typedError.GetError())
 		default:
 			return errors.Wrap(typedError, "Failed to patch function")
 		}
@@ -320,7 +325,6 @@ func (d *redeployCommandeer) isFunctionInTerminalState(ctx context.Context, func
 	if functionconfig.FunctionStateInSlice(function.Status.State,
 		[]functionconfig.FunctionState{
 			functionconfig.FunctionStateError,
-			functionconfig.FunctionStateUnhealthy,
 			functionconfig.FunctionStateScaledToZero,
 		}) {
 		return true, errors.New(fmt.Sprintf("Function '%s' is in terminal state '%s' but not ready",

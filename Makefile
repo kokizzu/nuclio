@@ -92,24 +92,28 @@ endif
 
 # alpine is commonly used by controller / dlx / autoscaler
 ifeq ($(NUCLIO_ARCH), armhf)
-	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm32v7/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm32v7/alpine:3.20
 	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/arm32v7/golang
 	NUCLIO_DOCKER_JAVA_OPENJDK		?= gcr.io/iguazio/openjdk:11-slim
 	NODE_IMAGE_NAME 				?= gcr.io/iguazio/arm32v7/node:14.21
 else ifeq ($(NUCLIO_ARCH), arm64)
-	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm64v8/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm64v8/alpine:3.20
 	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/arm64v8/golang
 	NUCLIO_DOCKER_JAVA_OPENJDK 		?= gcr.io/iguazio/arm64v8/openjdk:11-slim
 	NODE_IMAGE_NAME 				?= gcr.io/iguazio/arm64v8/node:14.21
 else
-	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/alpine:3.20
 	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/golang
 	NUCLIO_DOCKER_JAVA_OPENJDK		?= gcr.io/iguazio/openjdk:11-slim
 	NODE_IMAGE_NAME 				?= gcr.io/iguazio/node:14.21
 endif
 
-NUCLIO_BASE_IMAGE_TAG ?= 1.21
-NUCLIO_BASE_ALPINE_IMAGE_TAG ?= 1.21-alpine
+NUCLIO_PYTHON_BASE_IMAGE_NAME ?= gcr.io/iguazio/python
+
+NUCLIO_BASE_IMAGE_TAG ?= 1.23
+NUCLIO_BASE_ALPINE_IMAGE_TAG ?= 1.23-alpine
+DEFAULT_NUCTL_DOCUMENTATION_PATH := docs/reference/nuctl/cli
+NUCTL_DOCUMENTATION_PATH := $(if $(NUCTL_DOCUMENTATION_PATH),$(NUCTL_DOCUMENTATION_PATH),$(DEFAULT_NUCTL_DOCUMENTATION_PATH))
 
 #
 #  Must be first target
@@ -117,7 +121,6 @@ NUCLIO_BASE_ALPINE_IMAGE_TAG ?= 1.21-alpine
 .PHONY: all
 all:
 	$(error "Please pick a target (run 'make targets' to view targets)")
-
 
 #
 # Version resources
@@ -315,6 +318,7 @@ controller: build-builder
 		--build-arg BUILDKIT_INLINE_CACHE=1 \
 		--cache-from $(NUCLIO_CACHE_REPO)/controller:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG) \
 		--file cmd/controller/Dockerfile \
+		--platform linux/$(NUCLIO_ARCH) \
 		--tag $(NUCLIO_DOCKER_CONTROLLER_IMAGE_NAME) \
 		--tag $(NUCLIO_DOCKER_CONTROLLER_IMAGE_NAME_CACHE) \
 		$(NUCLIO_DOCKER_LABELS) .
@@ -328,13 +332,14 @@ endif
 NUCLIO_DOCKER_DASHBOARD_IMAGE_NAME    		= $(NUCLIO_DOCKER_REPO)/dashboard:$(NUCLIO_DOCKER_IMAGE_TAG)
 NUCLIO_DOCKER_DASHBOARD_IMAGE_NAME_CACHE    = $(NUCLIO_CACHE_REPO)/dashboard:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG)
 NUCLIO_DOCKER_DASHBOARD_UHTTPC_ARCH  		?= $(NUCLIO_ARCH)
+NUCLIO_DOCKER_DASHBOARD_UHTTPC_IMAGE   		?= gcr.io/iguazio/uhttpc:0.0.1
 
 ifeq ($(NUCLIO_ARCH), armhf)
-	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/arm32v7/nginx:1.25-alpine
+	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/arm32v7/nginx:1.27-alpine
 else ifeq ($(NUCLIO_ARCH), arm64)
-	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/arm64v8/nginx:1.25-alpine
+	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/arm64v8/nginx:1.27-alpine
 else
-	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/nginx:1.25-alpine
+	NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE  ?= gcr.io/iguazio/nginx:1.27-alpine
 endif
 
 .PHONY: dashboard
@@ -345,12 +350,14 @@ dashboard: build-builder
 		--build-arg NGINX_IMAGE=$(NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE) \
 		--build-arg NUCLIO_DOCKER_ALPINE_IMAGE=$(NUCLIO_DOCKER_ALPINE_IMAGE) \
 		--build-arg NUCLIO_GO_LINK_FLAGS_INJECT_VERSION="$(GO_LINK_FLAGS_INJECT_VERSION)" \
+		--build-arg UHTTPC_IMAGE="$(NUCLIO_DOCKER_DASHBOARD_UHTTPC_IMAGE)" \
 		--build-arg UHTTPC_ARCH="$(NUCLIO_DOCKER_DASHBOARD_UHTTPC_ARCH)" \
 		--build-arg NODE_IMAGE_NAME=$(NODE_IMAGE_NAME) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg BUILDKIT_INLINE_CACHE=1 \
 		--cache-from $(NUCLIO_DOCKER_DASHBOARD_IMAGE_NAME_CACHE) \
+		--platform linux/$(NUCLIO_ARCH) \
 		--file cmd/dashboard/docker/Dockerfile \
 		--tag $(NUCLIO_DOCKER_DASHBOARD_IMAGE_NAME) \
 		--tag $(NUCLIO_DOCKER_DASHBOARD_IMAGE_NAME_CACHE) \
@@ -424,6 +431,7 @@ handler-builder-python-onbuild: processor
 	docker build \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
+		--build-arg NUCLIO_PYTHON_BASE_IMAGE_NAME=$(NUCLIO_PYTHON_BASE_IMAGE_NAME) \
 		--cache-from $(NUCLIO_DOCKER_HANDLER_BUILDER_PYTHON_ONBUILD_IMAGE_NAME_CACHE) \
 		--file pkg/processor/build/runtime/python/docker/onbuild/Dockerfile \
 		--tag $(NUCLIO_DOCKER_HANDLER_BUILDER_PYTHON_ONBUILD_IMAGE_NAME) \
@@ -612,19 +620,24 @@ $(eval DOCKER_IMAGES_CACHE += $(filter-out $(DOCKER_IMAGES_CACHE),$(NUCLIO_DOCKE
 #
 
 .PHONY: fmt
-fmt:
+fmt: ensure-golangci-linter
 	gofmt -s -w .
-	golangci-lint run --fix
+	$(GOPATH)/bin/golangci-lint run --fix
 
 .PHONY: lint
-lint: modules ensure-test-files-annotated
-	@echo Installing linters...
-	@test -e $(GOPATH)/bin/golangci-lint || \
-	  	(curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v1.54.2)
-
+lint: modules ensure-test-files-annotated ensure-golangci-linter
 	@echo Linting...
 	$(GOPATH)/bin/golangci-lint run -v
 	@echo Done.
+
+.PHONY: lint-docs
+lint-docs:
+	vale docs
+	@sort .github/styles/Nuclio/ignore.txt -o .github/styles/Nuclio/ignore.txt
+
+.PHONY: linkcheck
+linkcheck:
+	make -C docs/ linkcheck
 
 .PHONY: ensure-test-files-annotated
 ensure-test-files-annotated:
@@ -637,6 +650,12 @@ ensure-test-files-annotated:
 	fi
 	@echo "All go test files have //go:build test_X annotation"
 	@exit $(.SHELLSTATUS)
+
+.PHONY: ensure-golangci-linter
+ensure-golangci-linter:
+	@echo Ensuring linters...
+	@test -e $(GOPATH)/bin/golangci-lint || \
+		(curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v1.63.4)
 
 #
 # Testing
@@ -702,6 +721,16 @@ test-k8s-undockerized: ensure-gopath
  		--timeout $(NUCLIO_GO_TEST_TIMEOUT) \
  		$(shell go list -tags="test_integration,test_kube" ./cmd/... ./pkg/... | grep -v nuctl)
 
+.PHONY: test-functions-k8s-undockerized
+test-functions-k8s-undockerized: ensure-gopath
+	@# nuctl is running by "test-k8s-nuctl" target and requires specific set of env
+	go test \
+		-tags="test_integration,test_functions_kube" \
+ 		-v \
+ 		-p 1 \
+ 		--timeout $(NUCLIO_GO_TEST_TIMEOUT) \
+ 		$(shell go list -tags="test_integration,test_functions_kube" ./cmd/... ./pkg/... | grep -v nuctl)
+
 .PHONY: test-broken-undockerized
 test-broken-undockerized: ensure-gopath
 	${eval LIST=${shell make --no-print-directory $(LIST_TESTS_MAKE_COMMAND)}}
@@ -732,6 +761,7 @@ test: build-test
 		--env NUCLIO_CI_SKIP_STRESS_TEST \
 		$(NUCLIO_DOCKER_TEST_TAG) \
 		/bin/bash -c "git config --global --add safe.directory /nuclio && LIST_TESTS_MAKE_COMMAND=${LIST_TESTS_MAKE_COMMAND} make ${NUCLIO_TEST_MAKE_TARGET}"
+
 .PHONY: test-k8s
 test-k8s: build-test
 	NUCLIO_TEST_KUBECONFIG=$(if $(NUCLIO_TEST_KUBECONFIG),$(NUCLIO_TEST_KUBECONFIG),$(KUBECONFIG)) \
@@ -756,7 +786,7 @@ test-k8s: build-test
 		--env KUBECONFIG=/kubeconfig \
 		--env NUCLIO_TEST_KUBE_DEFAULT_INGRESS_HOST=$(NUCLIO_TEST_KUBE_DEFAULT_INGRESS_HOST) \
 		$(NUCLIO_DOCKER_TEST_TAG) \
-		/bin/bash -c "git config --global --add safe.directory /nuclio && make test-k8s-undockerized"
+    	/bin/bash -c "git config --global --add safe.directory /nuclio && make $(NUCLIO_K8S_TEST_MAKE_TARGET)"
 
 # Runs from host to allow full control over Kubernetes cluster
 .PHONY: test-k8s-functional
@@ -802,7 +832,7 @@ test-nodejs:
 .PHONY: test-python
 test-python:
 	@set -e; \
-	for runtime in 3.11 3.10 3.9 3.8 3.7; do \
+	for runtime in 3.11 3.10 3.9; do \
 		docker build \
 			--build-arg PYTHON_IMAGE_TAG=$$runtime \
 			--build-arg CACHEBUST=$(shell date +%s) \
@@ -871,3 +901,55 @@ modules: ensure-gopath
 .PHONY: targets
 targets:
 	@awk -F: '/^[^ \t="]+:/ && !/PHONY/ {print $$1}' Makefile | sort -u
+
+#
+# NUCTL DOCS
+#
+.PHONY: print-nuctl-docs-path
+print-nuctl-docs-path:
+	@echo $(NUCTL_DOCUMENTATION_PATH)
+
+
+.PHONY: generate-nuctl-docs
+generate-nuctl-docs:
+	@go run pkg/nuctl/generator/docs.go $(NUCTL_DOCUMENTATION_PATH)
+
+#
+# PATCH REMOTE SYSTEM
+#
+
+PATCH_ENV_FILE_PATH = hack/scripts/patch-remote/patch_env.yml
+PATCH_HOST_IP ?= $(shell [ -f $(PATCH_ENV_FILE_PATH) ] && awk '/HOST_IP/ {print $$2}' $(PATCH_ENV_FILE_PATH))
+PATCH_USERNAME ?= $(shell [ -f $(PATCH_ENV_FILE_PATH) ] && awk '/SSH_USER/ {print $$2}' $(PATCH_ENV_FILE_PATH))
+
+hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME):
+	mkdir -p hack/scripts/patch-remote/.ssh
+	ssh-keygen -N '' -f hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME)
+	ssh-copy-id -i hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME).pub $(PATCH_USERNAME)@$(PATCH_HOST_IP)
+
+.PHONY: create-patch-ssh-key
+create-patch-ssh-key: hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME)
+
+.PHONY: cleanup-patch-ssh-key
+cleanup-patch-ssh-key:
+	rm -f hack/scripts/patch-remote/.ssh/*
+
+.PHONY: patch-remote-nuclio
+patch-remote-nuclio: hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME)
+	./hack/scripts/patch-remote/patch_remote.py \
+		--private-key-file hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME) \
+		--config hack/scripts/patch-remote/patch_env.yml
+
+.PHONY: patch-remote-dashboard
+patch-remote-dashboard: hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME)
+	./hack/scripts/patch-remote/patch_remote.py \
+		--private-key-file hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME) \
+		--config hack/scripts/patch-remote/patch_env.yml \
+		--targets dashboard
+
+.PHONY: patch-remote-controller
+patch-remote-controller: hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME)
+	./hack/scripts/patch-remote/patch_remote.py \
+		--private-key-file hack/scripts/patch-remote/.ssh/key_$(PATCH_HOST_IP)_$(PATCH_USERNAME) \
+		--config hack/scripts/patch-remote/patch_env.yml \
+		--targets controller

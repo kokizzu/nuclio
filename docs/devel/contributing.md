@@ -17,7 +17,7 @@ Ensure that your setup includes the following prerequisite components:
 - Linux or OSX
 - Git
 - Docker version 19.03+
-- The Go toolchain (CI tests with 1.21, best use that)
+- The Go toolchain (CI tests with 1.23, best use that)
 - Kubernetes version 1.24+ (mostly for testing) - `minikube` recommended; (you can follow
   the [Minikube getting-started guide](../setup/minikube/getting-started-minikube.md))
 
@@ -115,7 +115,7 @@ files at this time, but it's very easy to create run/debug targets and use the d
 
 1. Clone nuclio `git clone git@github.com:nuclio/nuclio.git > ~/nuclio`
 2. Open GoLand and **File > Open** and select `~/nuclio`
-3. Enable go modules **GoLand > Preferences > Go > Go Modules (vgo)** and ensure `Enable Go Modules` box is checked
+3. Enable go modules **GoLand > Preferences > Go > Ensure `Enable Go Modules` box is checked
 4. Run configurations are (currently) available for tests only
 
 
@@ -188,7 +188,7 @@ work with Kubernetes.
 <a id="submitting-a-pr"></a>
 ## Submitting a PR
 
-Your PRs will go through Github Action CI and code review. Make sure to follow
+Your PRs will go through GitHub Action CI and code review. Make sure to follow
 the [coding conventions](../devel/coding-conventions.md) and run `make fmt lint` before submitting a PR, that would
 save you some time failing on CI linting and test validations
 

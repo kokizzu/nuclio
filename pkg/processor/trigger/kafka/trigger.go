@@ -96,7 +96,6 @@ func newTrigger(parentLogger logger.Logger,
 		"sessionTimeout", configuration.sessionTimeout,
 		"heartbeatInterval", configuration.heartbeatInterval,
 		"rebalanceTimeout", configuration.rebalanceTimeout,
-		"rebalanceTimeout", configuration.rebalanceTimeout,
 		"retryBackoff", configuration.retryBackoff,
 		"maxWaitTime", configuration.maxWaitTime,
 		"rebalanceRetryMax", configuration.RebalanceRetryMax,
@@ -126,11 +125,30 @@ func (k *kafka) Start(checkpoint functionconfig.Checkpoint) error {
 
 	k.shutdownSignal = make(chan struct{}, 1)
 
+	// sendSignalCounter is a counter to track how many times a processor attempted to send a SIGCONT to the wrapper
+	// If the counter exceeds 3, we panic and restart the function to prevent entering a zombie state
+	sendSignalCounter := 0
+
 	// start consumption in the background
 	go func() {
 		for {
 			k.ctx = context.Background()
 			k.Logger.DebugWith("Starting to consume from broker", "topics", k.configuration.Topics)
+
+			if sendSignalCounter > 3 {
+				panic("Exceeded 3 failed attempts to send SIGCONT to the wrapper")
+			}
+			sendSignalCounter += 1
+
+			// signal workers to continue event processing
+			if err := k.SignalWorkersToContinue(); err != nil {
+				k.Logger.WarnWith("Failed to signal worker to continue event processing",
+					"err", errors.GetErrorStackString(err, 10))
+				continue
+			}
+
+			// reset the counter
+			sendSignalCounter = 0
 
 			// start consuming. this will exit without error if a rebalancing occurs
 			if err := k.consumerGroup.Consume(k.ctx, k.configuration.Topics, k); err != nil {
@@ -214,7 +232,12 @@ func (k *kafka) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.C
 			return errors.Wrap(err, "Failed to subscribe to explicit ack control messages")
 		}
 
-		go k.explicitAckHandler(session, explicitAckControlMessageChan, claim.Partition())
+		go k.explicitAckHandler(
+			session,
+			explicitAckControlMessageChan,
+			claim.Partition(),
+			claim.Topic(),
+		)
 	}
 
 	k.Logger.DebugWith("Starting claim consumption",
@@ -230,6 +253,11 @@ consumptionLoop:
 				int(claim.Partition()),
 				nil)
 			if err != nil {
+				// If all workers are terminated, we don't want to stop consumption to avoid Kafka reconnection
+				// and give some time to the explicitAckHandler to process the last control messages.
+				if errors.Is(err, worker.ErrAllWorkersAreTerminated) {
+					continue
+				}
 				return errors.Wrap(err, "Failed to allocate worker")
 			}
 
@@ -287,8 +315,10 @@ consumptionLoop:
 	k.Logger.DebugWith("Claim consumption stopped", "partition", claim.Partition())
 
 	// unsubscribe channel from the streamAck control message kind before closing it
-	if err := k.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
-		k.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+	if functionconfig.ExplicitAckEnabled(k.configuration.ExplicitAckMode) {
+		if err := k.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
+			k.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+		}
 	}
 
 	// shut down goroutines and channels
@@ -308,11 +338,6 @@ func (k *kafka) drainOnRebalance(session sarama.ConsumerGroupSession,
 
 	readyForRebalanceChan := make(chan bool)
 	defer close(readyForRebalanceChan)
-
-	// indicate whether this partition worker was drained
-	// this is used to avoid race condition where 2 different partitions sharing the same worker
-	// will both try to reset the drain flag needlessly
-	var drainedWorker bool
 
 	go func() {
 		defer common.CatchAndLogPanicWithOptions(k.ctx, // nolint: errcheck
@@ -348,12 +373,10 @@ func (k *kafka) drainOnRebalance(session sarama.ConsumerGroupSession,
 			// this needs to occur once. the reason is that this specific function (ConsumeClaim)
 			// runs in parallel for each partition, and we want to make sure that we only
 			// drain the workers once.
-			if err := k.SignalWorkerDraining(); err != nil {
+			if err := k.SignalWorkersToDrain(); err != nil {
 				k.Logger.DebugWith("Failed to signal worker draining",
 					"err", err.Error(),
 					"partition", claim.Partition())
-			} else {
-				drainedWorker = true
 			}
 			wg.Done()
 		}()
@@ -379,11 +402,11 @@ func (k *kafka) drainOnRebalance(session sarama.ConsumerGroupSession,
 			"partition", claim.Partition())
 
 	case <-time.After(k.configuration.maxWaitHandlerDuringRebalance):
-		k.Logger.DebugWith("Timed out waiting for handler to complete",
+		k.Logger.WarnWith("Timed out waiting for handler to complete",
 			"partition", claim.Partition())
 
 		// mark this as a failure, metric-wise
-		k.UpdateStatistics(false)
+		k.UpdateStatistics(false, 1)
 
 		if waitForHandler {
 			// the rebalance timeout occurred while we waited for the handler, cancel it and restart the worker
@@ -395,10 +418,6 @@ func (k *kafka) drainOnRebalance(session sarama.ConsumerGroupSession,
 				panic("Failed to cancel event handling")
 			}
 		}
-	}
-
-	if drainedWorker {
-		k.ResetWorkerDrainState()
 	}
 }
 
@@ -497,10 +516,6 @@ func (k *kafka) newKafkaConfig() (*sarama.Config, error) {
 
 		getTLSMinimumVersion := func(version string) uint16 {
 			switch version {
-			case "1.0":
-				return tls.VersionTLS10
-			case "1.1":
-				return tls.VersionTLS11
 			case "1.2":
 				return tls.VersionTLS12
 			case "1.3":
@@ -544,7 +559,13 @@ func (k *kafka) newKafkaConfig() (*sarama.Config, error) {
 		config.Net.SASL.User = k.configuration.SASL.User
 		config.Net.SASL.Password = k.configuration.SASL.Password
 		config.Net.SASL.Mechanism = sarama.SASLMechanism(k.configuration.SASL.Mechanism)
-		config.Net.SASL.Handshake = k.configuration.SASL.Handshake
+
+		// Set SASL handshake if explicitly specified in configuration, so we can use sarama's
+		// default handshake (which is true)
+		if k.configuration.SASL.Handshake != nil {
+			config.Net.SASL.Handshake = *k.configuration.SASL.Handshake
+		}
+
 		config.Net.SASL.SCRAMClientGeneratorFunc = k.resolveSCRAMClientGeneratorFunc(config.Net.SASL.Mechanism)
 
 		// per mechanism configuration
@@ -625,9 +646,11 @@ func (k *kafka) resolveSCRAMClientGeneratorFunc(mechanism sarama.SASLMechanism) 
 
 // explicitAckHandler reads offset data messages from the trigger's control channel, and marks the
 // offset accordingly
-func (k *kafka) explicitAckHandler(session sarama.ConsumerGroupSession,
+func (k *kafka) explicitAckHandler(
+	session sarama.ConsumerGroupSession,
 	controlMessageChan chan *controlcommunication.ControlMessage,
-	partitionNumber int32) {
+	partitionNumber int32,
+	topic string) {
 
 	k.Logger.InfoWith("Listening for explicit ack control messages")
 
@@ -642,8 +665,8 @@ func (k *kafka) explicitAckHandler(session sarama.ConsumerGroupSession,
 			continue
 		}
 
-		// skip the message if it is not for this partition
-		if explicitAckAttributes.Partition != partitionNumber {
+		// skip the message if it is not for this topic and partition
+		if !(explicitAckAttributes.Partition == partitionNumber && explicitAckAttributes.Topic == topic) {
 			continue
 		}
 

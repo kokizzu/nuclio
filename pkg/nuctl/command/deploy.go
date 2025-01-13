@@ -95,7 +95,7 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 			var err error
 
 			// initialize root
-			if err := rootCommandeer.initialize(); err != nil {
+			if err := rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -114,6 +114,8 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 					commandeer.functionConfig = commandeer.prepareFunctionConfigForRedeploy(importedFunction)
 				}
 			}
+
+			commandeer.functionConfigPath = commandeer.resolveFunctionConfigPath()
 
 			// If config file is provided
 			if importedFunction == nil && commandeer.functionConfigPath != "" {
@@ -675,6 +677,10 @@ func (d *deployCommandeer) resolveFunctionNameFromPath() (string, error) {
 }
 
 func (d *deployCommandeer) resolveFunctionConfigPath() string {
+
+	if d.functionConfigPath != "" {
+		return d.functionConfigPath
+	}
 
 	// if the user provided a configuration path, use that
 	if d.functionBuild.FunctionConfigPath != "" {

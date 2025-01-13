@@ -33,7 +33,6 @@ import (
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -67,6 +66,7 @@ type CreateFunctionOptions struct {
 	DependantImagesRegistryURL string
 	PermissionOptions          opa.PermissionOptions
 	AuthSession                auth.Session
+	AutofixConfiguration       bool
 }
 
 type UpdateFunctionOptions struct {
@@ -86,6 +86,9 @@ type DeleteFunctionOptions struct {
 
 	// whether to ignore the validation where functions being provisioned cannot be deleted
 	IgnoreFunctionStateValidation bool
+
+	// whether api gateways should be deleted if ones exist
+	DeleteApiGateways bool
 }
 
 type RedeployFunctionOptions struct {
@@ -458,6 +461,7 @@ type NuclioFunctionAPIGatewaySpec struct {
 type APIGatewayUpstreamSpec struct {
 	Kind             APIGatewayUpstreamKind        `json:"kind,omitempty"`
 	NuclioFunction   *NuclioFunctionAPIGatewaySpec `json:"nucliofunction,omitempty"`
+	Port             int                           `json:"port,omitempty"`
 	Percentage       int                           `json:"percentage,omitempty"`
 	RewriteTarget    string                        `json:"rewriteTarget,omitempty"`
 	ExtraAnnotations map[string]string             `json:"extraAnnotations,omitempty"`
@@ -478,6 +482,13 @@ type APIGatewayConfig struct {
 	Meta   APIGatewayMeta   `json:"metadata,omitempty"`
 	Spec   APIGatewaySpec   `json:"spec,omitempty"`
 	Status APIGatewayStatus `json:"status,omitempty"`
+}
+
+func GetAPIGatewayConfigFromInterface(apiGatewayConfigInterface interface{}) *APIGatewayConfig {
+	if apiGatewayConfig, ok := apiGatewayConfigInterface.(*APIGatewayConfig); ok {
+		return apiGatewayConfig
+	}
+	return nil
 }
 
 // APIGatewayState is state of api gateway
@@ -516,13 +527,14 @@ type DeleteAPIGatewayOptions struct {
 }
 
 type GetAPIGatewaysOptions struct {
-	Name        string
-	Namespace   string
-	Labels      string
-	AuthSession auth.Session
+	Name         string
+	Namespace    string
+	Labels       string
+	FunctionName string
+	AuthSession  auth.Session
 }
 
-// to appease k8s
+// DeepCopyInto to appease k8s
 func (s *APIGatewaySpec) DeepCopyInto(out *APIGatewaySpec) {
 
 	// TODO: proper deep copy
@@ -545,9 +557,11 @@ type GetFunctionReplicaLogsStreamOptions struct {
 
 	// Number of lines to show from the end of the logs
 	TailLines *int64
-}
 
-type FunctionSecret struct {
-	Kubernetes *v1.Secret
-	Local      *string
+	// A specific container name to stream logs from (if not specified, the "nuclio" container in the pod is used)
+	// Relevant only for pods with multiple containers
+	ContainerName string
+
+	// Permission options for the log stream
+	PermissionOptions opa.PermissionOptions
 }

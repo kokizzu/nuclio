@@ -35,6 +35,9 @@ type Runtime interface {
 	// ProcessEvent receives the event and processes it at the specific runtime
 	ProcessEvent(event nuclio.Event, functionLogger logger.Logger) (interface{}, error)
 
+	// ProcessBatch receives the event batch and processes it at the specific runtime
+	ProcessBatch(batch []nuclio.Event, functionLogger logger.Logger) ([]*ResponseWithErrors, error)
+
 	// GetFunctionLogger returns the function logger
 	GetFunctionLogger() logger.Logger
 
@@ -65,6 +68,9 @@ type Runtime interface {
 	// Drain signals to the runtime process to drain its accumulated events and waits for it to finish
 	Drain() error
 
+	// Continue signals the runtime process to continue event processing
+	Continue() error
+
 	// Terminate signals to the runtime process that processor is about to stop working
 	Terminate() error
 
@@ -74,14 +80,13 @@ type Runtime interface {
 
 // AbstractRuntime is the base for all runtimes
 type AbstractRuntime struct {
-	Logger               logger.Logger
-	FunctionLogger       logger.Logger
-	Context              *nuclio.Context
-	Statistics           Statistics
-	ControlMessageBroker controlcommunication.ControlMessageBroker
-	databindings         map[string]databinding.DataBinding
-	configuration        *Configuration
-	status               status.Status
+	Logger         logger.Logger
+	FunctionLogger logger.Logger
+	Context        *nuclio.Context
+	Statistics     Statistics
+	databindings   map[string]databinding.DataBinding
+	configuration  *Configuration
+	status         status.Status
 }
 
 // NewAbstractRuntime creates a new abstract runtime
@@ -176,7 +181,25 @@ func (ar *AbstractRuntime) GetEnvFromConfiguration() []string {
 
 // GetControlMessageBroker returns the control message broker
 func (ar *AbstractRuntime) GetControlMessageBroker() controlcommunication.ControlMessageBroker {
-	return ar.ControlMessageBroker
+	return ar.configuration.ControlMessageBroker
+}
+
+// Stop stops the runtime
+func (ar *AbstractRuntime) Stop() error {
+	ar.SetStatus(status.Stopped)
+	return nil
+}
+
+func (ar *AbstractRuntime) Drain() error {
+	return nil
+}
+
+func (ar *AbstractRuntime) Terminate() error {
+	return nil
+}
+
+func (ar *AbstractRuntime) Continue() error {
+	return nil
 }
 
 func (ar *AbstractRuntime) createAndStartDataBindings(parentLogger logger.Logger,
@@ -248,18 +271,4 @@ func (ar *AbstractRuntime) createContext(parentLogger logger.Logger,
 	}
 
 	return newContext, nil
-}
-
-// Stop stops the runtime
-func (ar *AbstractRuntime) Stop() error {
-	ar.SetStatus(status.Stopped)
-	return nil
-}
-
-func (ar *AbstractRuntime) Drain() error {
-	return nil
-}
-
-func (ar *AbstractRuntime) Terminate() error {
-	return nil
 }

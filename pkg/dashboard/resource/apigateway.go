@@ -17,7 +17,6 @@ limitations under the License.
 package resource
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -63,11 +62,13 @@ func (agr *apiGatewayResource) GetAll(request *http.Request) (map[string]restful
 
 	exportFunction := agr.GetURLParamBoolOrDefault(request, restful.ParamExport, false)
 	projectName := request.Header.Get(headers.ProjectName)
+	functionName := request.Header.Get(headers.FunctionName)
 
 	// filter by project name (when it's specified)
 	getAPIGatewaysOptions := platform.GetAPIGatewaysOptions{
-		AuthSession: agr.getCtxSession(ctx),
-		Namespace:   namespace,
+		AuthSession:  agr.getCtxSession(ctx),
+		FunctionName: functionName,
+		Namespace:    namespace,
 	}
 	if projectName != "" {
 		getAPIGatewaysOptions.Labels = fmt.Sprintf("%s=%s",
@@ -192,57 +193,12 @@ func (agr *apiGatewayResource) Update(request *http.Request, id string) (restful
 	return nil, nil
 }
 
-// TODO: deprecate this custom route
-func (agr *apiGatewayResource) updateAPIGateway(request *http.Request) (*restful.CustomRouteFuncResponse, error) {
-
-	ctx := request.Context()
-	agr.Logger.WarnWithCtx(ctx, "Updating api gateways via /api/apigateways has been deprecated. "+
-		"Please use /api/apigateways/<apigateway-name>")
-
-	// get api gateway id from body
-	body, err := io.ReadAll(request.Body)
-	if err != nil {
-		return nil, nuclio.WrapErrInternalServerError(errors.Wrap(err, "Failed to read body"))
-	}
-
-	apiGatewayInfoInstance := apiGatewayInfo{}
-	if err = json.Unmarshal(body, &apiGatewayInfoInstance); err != nil {
-		return nil, nuclio.WrapErrBadRequest(errors.Wrap(err, "Failed to parse JSON body"))
-	}
-	apiGatewayId := apiGatewayInfoInstance.Meta.Name
-
-	// retrieve request body so next handler can read it
-	request.Body.Close() // nolint: errcheck
-	request.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	// update api gateway
-	_, err = agr.Update(request, apiGatewayId)
-
-	// return the stuff
-	return &restful.CustomRouteFuncResponse{
-		ResourceType: "apiGateway",
-		Single:       true,
-		StatusCode:   common.ResolveErrorStatusCodeOrDefault(err, http.StatusNoContent),
-		Headers: map[string]string{
-			"Deprecation": "true",
-			"Link":        fmt.Sprintf("</api/apigateways/%s>; rel=\"alternate\"", apiGatewayId),
-		},
-	}, err
-}
-
 // GetCustomRoutes returns a list of custom routes for the resource
 func (agr *apiGatewayResource) GetCustomRoutes() ([]restful.CustomRoute, error) {
 
 	// since delete and update by default assume /resource/{id} and we want to get the id/namespace from the body
 	// we need to register custom routes
 	return []restful.CustomRoute{
-		{
-
-			// TODO: deprecate this custom route
-			Pattern:   "/",
-			Method:    http.MethodPut,
-			RouteFunc: agr.updateAPIGateway,
-		},
 		{
 			Pattern:   "/",
 			Method:    http.MethodDelete,
@@ -295,7 +251,7 @@ func (agr *apiGatewayResource) createAPIGateway(request *http.Request,
 	}
 
 	// just deploy. the status is async through polling
-	agr.Logger.DebugWithCtx(ctx, "Creating api gateway", "newAPIGateway", newAPIGateway)
+	agr.Logger.DebugWithCtx(ctx, "Creating api gateway", "newAPIGateway", newAPIGateway.APIGatewayConfig)
 	if err = agr.getPlatform().CreateAPIGateway(ctx, &platform.CreateAPIGatewayOptions{
 		AuthSession:                ctx.Value(auth.AuthSessionContextKey).(auth.Session),
 		APIGatewayConfig:           newAPIGateway.GetConfig(),

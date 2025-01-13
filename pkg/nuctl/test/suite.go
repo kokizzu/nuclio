@@ -107,6 +107,9 @@ func (suite *Suite) SetupSuite() {
 	suite.tempDir, _ = os.MkdirTemp("", "nuctl-tests")
 
 	suite.ctx = context.Background()
+
+	// create project
+	suite.ExecuteNuctl([]string{"create", "project", platform.DefaultProjectName}, map[string]string{}) // nolint: errcheck
 }
 
 func (suite *Suite) SetupTest() {
@@ -117,12 +120,18 @@ func (suite *Suite) SetupTest() {
 }
 
 func (suite *Suite) TearDownSuite() {
+	suite.logger.Debug("Tearing down suite")
 
 	// restore platform kind
 	err := os.Setenv(nuctlPlatformEnvVarName, suite.origPlatformKind)
 	suite.Require().NoError(err)
 
-	_ = os.RemoveAll(suite.tempDir)
+	err = os.RemoveAll(suite.tempDir)
+	suite.Require().NoError(err, "Failed to remove temp dir - %s", suite.tempDir)
+	// remove project
+	suite.ExecuteNuctl([]string{"delete", "project", platform.DefaultProjectName}, map[string]string{}) // nolint: errcheck
+
+	suite.logger.Debug("Suite tear down completed")
 }
 
 // ExecuteNuctl populates os.Args and executes nuctl as if it were executed from shell
@@ -141,10 +150,7 @@ func (suite *Suite) ExecuteNuctl(positionalArgs []string,
 		rootCommandeer.GetCmd().SetIn(suite.stdinReader)
 	}
 
-	// since args[0] is the executable name, just shove something there
-	argsStringSlice := []string{
-		"nuctl",
-	}
+	var argsStringSlice []string
 
 	// add positional arguments
 	argsStringSlice = append(argsStringSlice, positionalArgs...)
@@ -152,6 +158,14 @@ func (suite *Suite) ExecuteNuctl(positionalArgs []string,
 	for argName, argValue := range namedArgs {
 		argsStringSlice = append(argsStringSlice, fmt.Sprintf("--%s", argName), argValue)
 	}
+
+	if suite.isNamespaceRequired() && !suite.namespaceInArgs(positionalArgs, namedArgs) {
+		// prepend namespace to args
+		argsStringSlice = common.PrependStringsToStringSlice(argsStringSlice, "--namespace", suite.namespace)
+	}
+
+	// since args[0] is the executable name, just shove the binary there
+	argsStringSlice = common.PrependStringToStringSlice(argsStringSlice, "nuctl")
 
 	// override os.Args (this can't go wrong horribly, can it?)
 	os.Args = argsStringSlice
@@ -379,4 +393,20 @@ func (suite *Suite) ensureRunningOnPlatform(expectedPlatformKind string) {
 			expectedPlatformKind,
 			suite.origPlatformKind)
 	}
+}
+
+func (suite *Suite) namespaceInArgs(positionalArgs []string, namedArgs map[string]string) bool {
+	if common.StringSliceContainsString(positionalArgs, "--namespace") || common.StringSliceContainsString(positionalArgs, "-n") {
+		return true
+	}
+
+	if _, ok := namedArgs["namespace"]; ok {
+		return true
+	}
+
+	return false
+}
+
+func (suite *Suite) isNamespaceRequired() bool {
+	return suite.namespace != "" && common.GetKubeconfigPath("") != ""
 }

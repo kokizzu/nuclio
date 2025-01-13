@@ -180,6 +180,21 @@ func (suite *AbstractPlatformTestSuite) TestProjectCreateOptions() {
 			},
 			ExpectValidationFailure: true,
 		},
+		{
+			Name: "InvalidLabels",
+			CreateProjectOptions: &platform.CreateProjectOptions{
+				ProjectConfig: &platform.ProjectConfig{
+					Meta: platform.ProjectMeta{
+						Name: "a-name",
+						Labels: map[string]string{
+							"invalid label ## .. %%": "value",
+							"valid-key":              "invalid value ## .. %%",
+						},
+					},
+				},
+			},
+			ExpectValidationFailure: true,
+		},
 	} {
 		suite.Run(testCase.Name, func() {
 			defer func() {
@@ -291,12 +306,6 @@ func (suite *AbstractPlatformTestSuite) TestValidationFailOnMalformedIngressesSt
 }
 
 func (suite *AbstractPlatformTestSuite) TestEnrichDefaultHttpTrigger() {
-	functionConfig := functionconfig.NewConfig()
-	functionConfig.Meta.Name = "f1"
-	functionConfig.Meta.Namespace = "default"
-	functionConfig.Meta.Labels = map[string]string{
-		common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
-	}
 	trueValue := true
 	falseValue := false
 
@@ -337,6 +346,12 @@ func (suite *AbstractPlatformTestSuite) TestEnrichDefaultHttpTrigger() {
 			&platform.AbstractProject{},
 		}, nil).Once()
 
+		functionConfig := functionconfig.NewConfig()
+		functionConfig.Meta.Name = "f1"
+		functionConfig.Meta.Namespace = "default"
+		functionConfig.Meta.Labels = map[string]string{
+			common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
+		}
 		suite.Platform.Config.DisableDefaultHTTPTrigger = testCase.PlatformDisableDefaultHttpTrigger
 		functionConfig.Spec.DisableDefaultHTTPTrigger = testCase.FunctionDisableDefaultHttpTrigger
 
@@ -345,6 +360,130 @@ func (suite *AbstractPlatformTestSuite) TestEnrichDefaultHttpTrigger() {
 		suite.Require().NoError(err)
 
 		suite.Require().Equal(testCase.ExpectedValue, *functionConfig.Spec.DisableDefaultHTTPTrigger)
+
+		// check that http trigger exists/doesn't exist after enrichment
+		if testCase.ExpectedValue {
+			suite.Require().NotContains(functionConfig.Spec.Triggers, functionconfig.GetDefaultHTTPTrigger().Name)
+		} else {
+			suite.Require().Contains(functionConfig.Spec.Triggers, functionconfig.GetDefaultHTTPTrigger().Name)
+		}
+	}
+}
+
+func (suite *AbstractPlatformTestSuite) TestEnrichBatchConfiguration() {
+	for _, testCase := range []struct {
+		name                       string
+		batchConfiguration         *functionconfig.BatchConfiguration
+		expectedBatchConfiguration functionconfig.BatchConfiguration
+	}{
+
+		{
+			name: "enable-batching-with-default-values",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode: functionconfig.BatchModeEnable,
+			},
+			expectedBatchConfiguration: functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 10,
+				Timeout:   "1s",
+			},
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			functionConfig := &functionconfig.Config{
+				Spec: functionconfig.Spec{
+					Triggers: map[string]functionconfig.Trigger{
+						"http": {
+							Name:  "http",
+							Batch: testCase.batchConfiguration,
+						},
+					},
+				},
+			}
+			err := suite.Platform.enrichBatchParams(suite.ctx, functionConfig)
+			suite.Require().NoError(err)
+
+			suite.Require().Equal(testCase.expectedBatchConfiguration.BatchSize, testCase.batchConfiguration.BatchSize)
+			suite.Require().Equal(testCase.expectedBatchConfiguration.Mode, testCase.batchConfiguration.Mode)
+			suite.Require().Equal(testCase.expectedBatchConfiguration.Timeout, testCase.batchConfiguration.Timeout)
+
+		})
+	}
+}
+
+func (suite *AbstractPlatformTestSuite) TestValidateBatchConfiguration() {
+	for _, testCase := range []struct {
+		name               string
+		batchConfiguration *functionconfig.BatchConfiguration
+		expectError        bool
+		runtime            string
+		triggerKind        string
+	}{
+
+		{
+			name: "wrong-batch-size",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: -3,
+				Timeout:   "1s",
+			},
+			runtime:     "python:3.9",
+			triggerKind: "http",
+			expectError: true,
+		},
+		{
+			name: "wrong-timeout-size",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 1,
+				Timeout:   "test",
+			},
+			runtime:     "python:3.9",
+			triggerKind: "http",
+			expectError: true,
+		},
+		{
+			name: "correct-configuration",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 1,
+				Timeout:   "1ms",
+			},
+			runtime:     "python:3.9",
+			triggerKind: "http",
+		},
+		{
+			name: "wrong-runtime",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 1,
+				Timeout:   "1ms",
+			},
+			runtime:     "go",
+			triggerKind: "http",
+		},
+		{
+			name: "wrong-trigger-kind",
+			batchConfiguration: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 1,
+				Timeout:   "1ms",
+			},
+			runtime:     "python:3.11",
+			triggerKind: "cron",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+
+			err := suite.Platform.validateBatchConfiguration(&functionconfig.Config{Spec: functionconfig.Spec{Runtime: testCase.runtime, Triggers: map[string]functionconfig.Trigger{
+				"my-trigger": {Kind: testCase.triggerKind, Batch: testCase.batchConfiguration},
+			}}})
+			if testCase.expectError {
+				suite.Require().NotNil(err)
+			} else {
+				suite.Require().NoError(err)
+			}
+		})
 	}
 }
 
@@ -916,16 +1055,19 @@ func (suite *AbstractPlatformTestSuite) TestMinMaxReplicas() {
 
 func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() {
 	for idx, testCase := range []struct {
+		name                     string
 		triggers                 map[string]functionconfig.Trigger
 		functionMetaAnnotations  map[string]string
 		supportAutoScale         bool
 		expectedEnrichedTriggers map[string]functionconfig.Trigger
 		shouldFailValidation     bool
+		runtime                  string
 	}{
 
-		// enrich maxWorkers to 1
+		// enrich NumWorkers to 1
 		// enrich name from key
 		{
+			name: "enrich-num-workers",
 			triggers: map[string]functionconfig.Trigger{
 				"some-trigger": {
 					Kind: "http",
@@ -934,7 +1076,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 			expectedEnrichedTriggers: map[string]functionconfig.Trigger{
 				"some-trigger": {
 					Kind:       "http",
-					MaxWorkers: 1,
+					NumWorkers: 1,
 					Name:       "some-trigger",
 				},
 			},
@@ -942,6 +1084,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 
 		// enrich with default http trigger
 		{
+			name:     "enrich-default-trigger",
 			triggers: nil,
 			expectedEnrichedTriggers: func() map[string]functionconfig.Trigger {
 				defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
@@ -953,6 +1096,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 
 		// do not allow more than 1 http trigger
 		{
+			name: "more-than-1-http-trigger",
 			triggers: map[string]functionconfig.Trigger{
 				"firstHTTPTrigger": {
 					Kind: "http",
@@ -966,6 +1110,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 
 		// do not allow empty name triggers
 		{
+			name: "empty-trigger-name",
 			triggers: map[string]functionconfig.Trigger{
 				"": {
 					Kind: "http",
@@ -976,6 +1121,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 
 		// mismatching trigger key and name
 		{
+			name: "mismatch-trigger-name-and-key",
 			triggers: map[string]functionconfig.Trigger{
 				"a": {
 					Kind: "http",
@@ -987,6 +1133,8 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 
 		// do not allow explicit ack mode and pooled worker allocation mode
 		{
+			name:    "python-explicitAck-pool-allocator",
+			runtime: "python",
 			triggers: map[string]functionconfig.Trigger{
 				"http-trigger": {
 					Kind: "http",
@@ -1002,9 +1150,43 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 			},
 			shouldFailValidation: true,
 		},
+		// do not allow explicit ack mode and pooled worker allocation mode
+		{
+			name:    "golang-explicitAck-pool-allocator",
+			runtime: "golang",
+			triggers: map[string]functionconfig.Trigger{
+				"http-trigger": {
+					Kind: "http",
+				},
+				"kafka-trigger": {
+					Kind:            "kafka-cluster",
+					Name:            "kafka-trigger",
+					ExplicitAckMode: "enable",
+				},
+			},
+			functionMetaAnnotations: map[string]string{
+				"nuclio.io/kafka-worker-allocation-mode": "pool",
+			},
+			shouldFailValidation: false,
+			expectedEnrichedTriggers: map[string]functionconfig.Trigger{
+				"http-trigger": {
+					Name:       "http-trigger",
+					Disabled:   false,
+					NumWorkers: 1,
+					Kind:       "http",
+				},
+				"kafka-trigger": {
+					Kind:                     "kafka-cluster",
+					Name:                     "kafka-trigger",
+					ExplicitAckMode:          "disable",
+					WorkerTerminationTimeout: functionconfig.DefaultWorkerTerminationTimeout,
+				},
+			},
+		},
 
 		// enrich explicit ack mode and worker termination timeout
 		{
+			name: "explicitAck-enrich-worker-termination-timeout",
 			triggers: map[string]functionconfig.Trigger{
 				"http-trigger": {
 					Kind: "http",
@@ -1017,7 +1199,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 			expectedEnrichedTriggers: map[string]functionconfig.Trigger{
 				"http-trigger": {
 					Kind:       "http",
-					MaxWorkers: 1,
+					NumWorkers: 1,
 					Name:       "http-trigger",
 				},
 				"kafka-trigger": {
@@ -1030,6 +1212,7 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 			shouldFailValidation: false,
 		},
 		{
+			name: "v3io-autoscale",
 			triggers: map[string]functionconfig.Trigger{
 				"v3ioStream": {
 					Kind: "v3ioStream",
@@ -1040,53 +1223,57 @@ func (suite *AbstractPlatformTestSuite) TestEnrichAndValidateFunctionTriggers() 
 			shouldFailValidation: true,
 		},
 	} {
+		suite.Run(testCase.name, func() {
+			suite.mockedPlatform.On("GetProjects", suite.ctx, &platform.GetProjectsOptions{
+				Meta: platform.ProjectMeta{
+					Name:      platform.DefaultProjectName,
+					Namespace: "default",
+				},
+			}).Return([]platform.Project{
+				&platform.AbstractProject{},
+			}, nil).Once()
 
-		suite.mockedPlatform.On("GetProjects", suite.ctx, &platform.GetProjectsOptions{
-			Meta: platform.ProjectMeta{
-				Name:      platform.DefaultProjectName,
-				Namespace: "default",
-			},
-		}).Return([]platform.Project{
-			&platform.AbstractProject{},
-		}, nil).Once()
+			// name it with index and shift with 65 to get A as first letter
+			functionName := string(rune(idx + 65))
+			functionConfig := *functionconfig.NewConfig()
 
-		// name it with index and shift with 65 to get A as first letter
-		functionName := string(rune(idx + 65))
-		functionConfig := *functionconfig.NewConfig()
+			createFunctionOptions := &platform.CreateFunctionOptions{
+				Logger:         suite.Logger,
+				FunctionConfig: functionConfig,
+			}
+			if testCase.runtime != "" {
+				createFunctionOptions.FunctionConfig.Spec.Runtime = testCase.runtime
+			}
+			createFunctionOptions.FunctionConfig.Meta.Name = functionName
+			createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
+				common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
+			}
+			createFunctionOptions.FunctionConfig.Spec.Triggers = testCase.triggers
+			suite.Logger.DebugWith("Checking function ", "functionName", functionName)
 
-		createFunctionOptions := &platform.CreateFunctionOptions{
-			Logger:         suite.Logger,
-			FunctionConfig: functionConfig,
-		}
-		createFunctionOptions.FunctionConfig.Meta.Name = functionName
-		createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
-			common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
-		}
-		createFunctionOptions.FunctionConfig.Spec.Triggers = testCase.triggers
-		suite.Logger.DebugWith("Checking function ", "functionName", functionName)
+			if testCase.functionMetaAnnotations != nil {
+				createFunctionOptions.FunctionConfig.Meta.Annotations = testCase.functionMetaAnnotations
+			}
 
-		if testCase.functionMetaAnnotations != nil {
-			createFunctionOptions.FunctionConfig.Meta.Annotations = testCase.functionMetaAnnotations
-		}
+			if testCase.supportAutoScale {
+				one, five := 1, 5
+				createFunctionOptions.FunctionConfig.Spec.MinReplicas = &one
+				createFunctionOptions.FunctionConfig.Spec.MaxReplicas = &five
+			}
 
-		if testCase.supportAutoScale {
-			one, five := 1, 5
-			createFunctionOptions.FunctionConfig.Spec.MinReplicas = &one
-			createFunctionOptions.FunctionConfig.Spec.MaxReplicas = &five
-		}
+			err := suite.Platform.EnrichFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
+			suite.Require().NoError(err, "Failed to enrich function")
 
-		err := suite.Platform.EnrichFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
-		suite.Require().NoError(err, "Failed to enrich function")
+			err = suite.Platform.ValidateFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
+			if testCase.shouldFailValidation {
+				suite.Require().Error(err, "Validation passed unexpectedly")
+				return
+			}
 
-		err = suite.Platform.ValidateFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
-		if testCase.shouldFailValidation {
-			suite.Require().Error(err, "Validation passed unexpectedly")
-			continue
-		}
-
-		suite.Require().NoError(err, "Validation failed unexpectedly")
-		suite.Equal(testCase.expectedEnrichedTriggers,
-			createFunctionOptions.FunctionConfig.Spec.Triggers)
+			suite.Require().NoError(err, "Validation failed unexpectedly")
+			suite.Equal(testCase.expectedEnrichedTriggers,
+				createFunctionOptions.FunctionConfig.Spec.Triggers)
+		})
 	}
 }
 func (suite *AbstractPlatformTestSuite) TestEnrichEnvVars() {
@@ -1155,6 +1342,37 @@ func (suite *AbstractPlatformTestSuite) TestEnrichEnvVars() {
 			suite.Platform.enrichEnvVars(functionConfig)
 			suite.Require().Equal(testCase.ExpectedEnvFrom, functionConfig.Spec.EnvFrom)
 		})
+	}
+}
+
+// TODO: remove this test in 1.15.x
+func (suite *AbstractPlatformTestSuite) TestEnrichNumWorkersFromMaxWorkers() {
+	functionConfig := functionconfig.NewConfig()
+
+	functionConfig.Meta.Name = "some-function"
+	functionConfig.Meta.Labels = map[string]string{
+		common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
+	}
+
+	numWorkers := 5
+
+	functionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
+		"http-trigger": {
+			Kind:       "http",
+			MaxWorkers: numWorkers,
+		},
+		"v3ioStream": {
+			Kind:       "v3ioStream",
+			MaxWorkers: numWorkers,
+		},
+	}
+
+	err := suite.Platform.enrichTriggers(suite.ctx, functionConfig)
+	suite.Require().NoError(err, "Failed to enrich function")
+
+	// check that the number of workers was enriched from max workers
+	for _, trigger := range functionConfig.Spec.Triggers {
+		suite.Require().Equal(numWorkers, trigger.NumWorkers)
 	}
 }
 

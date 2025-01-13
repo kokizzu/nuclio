@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 
 	"github.com/nuclio/errors"
@@ -104,14 +106,25 @@ func ConvertMapToFunctionConfigWithStatus(functionMap map[string]interface{}) (*
 // saveReportToFile saves the report to the file
 // It does not return any errors if they occur; instead, it logs an error for the best effort
 func saveReportToFile(ctx context.Context, loggerInstance logger.Logger, report interface{}, path string) {
-	file, err := json.Marshal(report)
+	content, err := json.Marshal(report)
 	if err != nil {
 		loggerInstance.ErrorWithCtx(ctx,
 			"Failed to marshal report to json",
 			"err", err,
 			"path", path)
 	}
-	if err := os.WriteFile(path, file, 0644); err != nil {
+	// get the directory path from the file path
+	dir := filepath.Dir(path)
+
+	// check if the directory exists, create it if it doesn't
+	if err := common.EnsureDirExists(ctx, loggerInstance, dir); err != nil {
+		loggerInstance.ErrorWithCtx(ctx,
+			"Failed to create a directory",
+			"directory", dir,
+			"error", err)
+	}
+
+	if err := os.WriteFile(path, content, 0644); err != nil {
 		loggerInstance.ErrorWithCtx(ctx,
 			"Failed to write report to file",
 			"err", err,

@@ -61,8 +61,6 @@ class Runtimes(object):
     dotnetcore = "dotnetcore"
     shell = "shell"
     ruby = "ruby"
-    python37 = "python:3.7"
-    python38 = "python:3.8"
     python39 = "python:3.9"
     python310 = "python:3.10"
     python311 = "python:3.11"
@@ -77,6 +75,9 @@ class Runtimes(object):
                 Runtimes.python: "empty:handler",
                 Runtimes.python37: "empty:handler",
                 Runtimes.python38: "empty:handler",
+                Runtimes.python39: "empty:handler",
+                Runtimes.python310: "empty:handler",
+                Runtimes.python311: "empty:handler",
                 Runtimes.golang: "empty:Handler",
                 Runtimes.java: "EmptyHandler",
                 Runtimes.nodejs: "empty:handler",
@@ -93,6 +94,9 @@ class Runtimes(object):
                 Runtimes.python: "empty.py",
                 Runtimes.python37: "empty.py",
                 Runtimes.python38: "empty.py",
+                Runtimes.python39: "empty.py",
+                Runtimes.python310: "empty.py",
+                Runtimes.python311: "empty.py",
                 Runtimes.golang: "empty.go",
                 Runtimes.java: "EmptyHandler.java",
                 Runtimes.nodejs: "empty.js",
@@ -108,6 +112,9 @@ class Runtimes(object):
             Runtimes.golang,
             Runtimes.python37,
             Runtimes.python38,
+            Runtimes.python39,
+            Runtimes.python310,
+            Runtimes.python311,
             Runtimes.java,
             Runtimes.nodejs,
             Runtimes.dotnetcore,
@@ -155,7 +162,10 @@ class Vegeta(object):
                            input=f"POST {function_url}".encode(),
                            timeout=30)
         finally:
-            os.remove(path=os.path.join(self._workdir, body_size_filename))
+            # sanitize path against path traversal
+            path = os.path.abspath(os.path.join(self._workdir, body_size_filename))
+            sanitized_path = os.path.relpath(os.path.join("/", path), "/")
+            os.remove(path=sanitized_path)
 
     def plot(self, function_names, body_size):
         encoded_bin_names = " ".join(f"{self._resolve_bin_name(function_name, body_size)}"

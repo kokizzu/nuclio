@@ -38,6 +38,8 @@ import (
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 
 	"github.com/gobuffalo/flect"
+	"github.com/jarcoal/httpmock"
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/nuclio-sdk-go"
 	"github.com/rs/xid"
@@ -122,16 +124,6 @@ func (suite *functionDeployTestSuite) TestDeploy() {
 			runtime:  "dotnetcore",
 			handler:  "nuclio:empty",
 			filename: "empty.cs",
-		},
-		{
-			runtime:  "python:3.7",
-			handler:  "empty:handler",
-			filename: "empty.py",
-		},
-		{
-			runtime:  "python:3.8",
-			handler:  "empty:handler",
-			filename: "empty.py",
 		},
 		{
 			runtime:  "python:3.9",
@@ -344,6 +336,9 @@ func (suite *functionDeployTestSuite) TestDeployFromFunctionConfig() {
 	// the function has 1 http trigger - api. here we are verifying the default HTTP trigger wasn't added
 	suite.Require().Equal(1, len(functionconfig.GetTriggersByKind(deployedFunctionConfig.Spec.Triggers, "http")))
 	suite.Require().Equal("http", deployedFunctionConfig.Spec.Triggers["api"].Kind)
+
+	suite.Require().Equal("500m", deployedFunctionConfig.Spec.Resources.Requests.Cpu().String())
+	suite.Require().Equal("2Mi", deployedFunctionConfig.Spec.Resources.Requests.Memory().String())
 
 	// use nutctl to delete the function when we're done
 	defer suite.ExecuteNuctl([]string{"delete", "fu", functionName}, nil) // nolint: errcheck
@@ -1412,7 +1407,7 @@ func (suite *functionGetTestSuite) TestGet() {
 		parsedFunction, err := suite.getFunctionInFormat(testCase.FunctionName, testCase.OutputFormat)
 
 		// ensure parsing went well, and response is valid (json/yaml)
-		suite.Require().NoError(err, "Failed to unmarshal function")
+		suite.Require().NoError(err, "Failed to unmarshal function", testCase.OutputFormat)
 
 		// sanity, we got the function we asked for
 		suite.Assert().Equal(testCase.FunctionName, parsedFunction.Meta.Name)
@@ -1423,7 +1418,7 @@ type functionDeleteTestSuite struct {
 	Suite
 }
 
-func (suite *functionGetTestSuite) TestDelete() {
+func (suite *functionDeleteTestSuite) TestDelete() {
 	var err error
 
 	uniqueSuffix := "-" + xid.New().String()
@@ -1465,7 +1460,7 @@ func (suite *functionGetTestSuite) TestDelete() {
 	err = suite.ExecuteNuctl([]string{"delete", "fu", functionName}, nil)
 	suite.Require().NoError(err)
 
-	// try invoke, it should failed
+	// try invoking, it should fail
 	err = suite.RetryExecuteNuctlUntilSuccessful([]string{"invoke", functionName},
 		map[string]string{
 			"method": "POST",
@@ -1474,6 +1469,100 @@ func (suite *functionGetTestSuite) TestDelete() {
 		},
 		true)
 	suite.Require().NoError(err, "Function was suppose to be deleted!")
+}
+
+func (suite *functionDeleteTestSuite) TestDeleteBrokenFunction() {
+	suite.ensureRunningOnPlatform(common.LocalPlatformName)
+
+	functionPath := path.Join(path.Join(common.GetSourceDir(), "test", "_function_configs"), "error", "wrong-name", "function.json")
+	functionConfig := functionconfig.Config{}
+	functionBody, err := os.ReadFile(functionPath)
+	suite.Require().NoError(err)
+
+	err = json.Unmarshal(functionBody, &functionConfig)
+	suite.Require().NoError(err)
+	functionName := functionConfig.Meta.Name
+	functionConfig.Meta.Namespace = suite.namespace
+
+	// Create a temporary file in the system's default temporary directory
+	tempFile, err := os.CreateTemp(suite.tempDir, "decoded-func_*.json")
+	suite.Require().NoError(err)
+	defer os.Remove(tempFile.Name())
+
+	// decoding function config to base64 and writing it to a temp file
+	decodedFunctionSourceCode := base64.StdEncoding.EncodeToString(functionBody)
+	_, err = tempFile.WriteString(decodedFunctionSourceCode)
+	suite.Require().NoError(err)
+
+	// emulate the behaviour of previous versions bug, where we wrote file named as a first word before the 1st space
+	storageFunctionPath := fmt.Sprintf("/etc/nuclio/store/functions/%s/%s.json", suite.namespace, functionName)
+	storageFunctionPath = strings.Fields(storageFunctionPath)[0]
+
+	err = suite.dockerClient.CopyObjectsToContainer("nuclio-local-storage-reader", map[string]string{tempFile.Name(): strings.Fields(storageFunctionPath)[0]})
+	suite.Require().NoError(err)
+	err = suite.ExecuteNuctl([]string{"delete", "fu", functionName, "--force"}, nil)
+	suite.Require().NoError(err)
+
+	err = suite.ExecuteNuctl([]string{"get", "functions"}, nil)
+	suite.Require().NoError(err)
+	suite.Require().NotContains(suite.outputBuffer.String(), functionName)
+}
+
+func (suite *functionDeleteTestSuite) TestForceDelete() {
+	// Force delete is currently not supported on local platform
+	suite.ensureRunningOnPlatform(common.KubePlatformName)
+
+	var err error
+
+	uniqueSuffix := "-" + xid.New().String()
+	functionName := "reverser" + uniqueSuffix
+	imageName := "nuclio/processor-" + functionName
+
+	namedArgs := map[string]string{
+		"path":    path.Join(suite.GetFunctionsDir(), "common", "reverser", "golang"),
+		"runtime": "golang",
+		"handler": "main:Reverse",
+	}
+
+	// deploy function in goroutine
+	deploymentErrChan := make(chan error)
+	go func() {
+		err := suite.ExecuteNuctl([]string{
+			"deploy",
+			functionName,
+			"--verbose",
+			"--no-pull",
+		}, namedArgs)
+		// send deployment error to channel so the goroutine will exit.
+		// the error assertion will happen in the main thread
+		deploymentErrChan <- err
+	}()
+
+	// wait for function deployment to start, then force delete the function
+	time.Sleep(3 * time.Second)
+	// function removed
+	err = suite.ExecuteNuctl([]string{"delete", "fu", functionName, "--force"}, nil)
+	suite.Require().NoError(err)
+
+	// cleanup
+	defer suite.dockerClient.RemoveImage(imageName) // nolint: errcheck
+
+	// try invoking, it should fail
+	err = suite.RetryExecuteNuctlUntilSuccessful([]string{"invoke", functionName},
+		map[string]string{
+			"method": "POST",
+			"body":   "-reverse this string+",
+			"via":    "external-ip",
+		},
+		true)
+	suite.Require().NoError(err, "Function was suppose to be deleted!")
+
+	// wait for deployment command to exit
+	deploymentErr := <-deploymentErrChan
+	close(deploymentErrChan)
+
+	// deployment should fail because we force deleted the function
+	suite.Require().Error(deploymentErr, "Function deployment was suppose to be stopped!")
 }
 
 type functionExportImportTestSuite struct {
@@ -1515,7 +1604,22 @@ func (suite *functionExportImportTestSuite) TestImportFunction() {
 	defer suite.ExecuteNuctl([]string{"delete", "fu", functionName}, nil) // nolint: errcheck
 
 	// import the project
-	err := suite.ExecuteNuctl([]string{"import", "fu", functionConfigPath, "--verbose"}, nil) // nolint: errcheck
+	err := suite.ExecuteNuctl([]string{"import", "fu", functionConfigPath, "--verbose"}, nil)
+	suite.Require().NoError(err)
+
+	suite.assertFunctionImported(functionName, true)
+}
+
+func (suite *functionExportImportTestSuite) TestImportFunctionWhichNeverRun() {
+	functionConfigPath := path.Join(suite.GetImportsDir(), "never_run_before_export_function.yaml")
+
+	// this name is defined within never_run_before_export_function.yaml
+	functionName := "never-run-func"
+
+	defer suite.ExecuteNuctl([]string{"delete", "fu", functionName}, nil) // nolint: errcheck
+
+	// import the project
+	err := suite.ExecuteNuctl([]string{"import", "fu", functionConfigPath, "--verbose"}, nil)
 	suite.Require().NoError(err)
 
 	suite.assertFunctionImported(functionName, true)
@@ -1547,7 +1651,11 @@ func (suite *functionExportImportTestSuite) TestImportWithReport() {
 	}()
 
 	// generate report path
-	reportPath := suite.tempDir + "/nuctl-import-report.json"
+	reportPath := path.Join(suite.tempDir,
+		fmt.Sprintf("/subdir/import-project-report-%s.json",
+			common.GenerateRandomString(5, common.LettersAndNumbers),
+		),
+	)
 	err := suite.ExecuteNuctl([]string{"import", "project", "--verbose", "--save-report", "--report-file-path", reportPath, functionConfigPath}, nil)
 	suite.Require().NotNil(err)
 
@@ -1556,20 +1664,29 @@ func (suite *functionExportImportTestSuite) TestImportWithReport() {
 	suite.Require().NoError(err)
 
 	projectsReport := &nuctlcommon.ProjectReports{}
-	err = json.Unmarshal(reportBytes, &projectsReport.Reports)
+	err = json.Unmarshal(reportBytes, &projectsReport)
 	suite.Require().NoError(err)
 
 	projectReport, _ := projectsReport.GetReport(projectName)
 	suite.Require().NotNil(projectsReport)
-	suite.Require().Contains(projectReport.Failed.FailReason, "Import failed for some of the functions. Project: `test-project`")
+	suite.Require().Contains(projectReport.Failed.FailReason, "Import failed for some of the functions in project `test-project`.")
 
 	suite.Require().Equal(2, len(projectReport.FunctionReports.Success))
 	suite.Require().Contains(projectReport.FunctionReports.Success, "correct-test-function")
 	suite.Require().Contains(projectReport.FunctionReports.Success, "incorrect-fixable-test-function")
 
 	suite.Require().Contains(projectReport.FunctionReports.Failed, "incorrect-not-fixable-test-function")
-	suite.Require().Equal("If image is passed, runtime must be specified", projectReport.FunctionReports.Failed["incorrect-not-fixable-test-function"].FailReason)
+	suite.Require().Equal("There's more than one http trigger (unsupported)", projectReport.FunctionReports.Failed["incorrect-not-fixable-test-function"].FailReason)
 	suite.Require().Equal(false, projectReport.FunctionReports.Failed["incorrect-not-fixable-test-function"].CanBeAutoFixed)
+}
+
+// This test verifies that when the project report is empty, the length of the table is zero (so we don't print the report)
+func (suite *functionExportImportTestSuite) TestReportLength() {
+	projectReports := &nuctlcommon.ProjectReports{}
+	t := table.NewWriter()
+	projectReports.PrintAsTable(t, false)
+
+	suite.Require().Equal(t.Length(), 0)
 }
 
 func (suite *functionExportImportTestSuite) TestExportImportRoundTripFromStdin() {
@@ -1809,6 +1926,79 @@ func (suite *functionExportImportTestSuite) TestExportImportRoundTripFailingFunc
 	suite.Require().Error(err, "Function code must be provided either in the path or inline in a spec file; alternatively, an image or handler may be provided")
 }
 
+type functionRedeployTestSuite struct {
+	Suite
+}
+
+func (suite *functionRedeployTestSuite) TestRedeploy() {
+	functionName := "redeploy-test-function"
+	functionPath := path.Join(suite.GetImportsDir(), "redeploy-test-function.yaml")
+	apiUrl := "https://api.com/api"
+
+	namedArgs := map[string]string{
+		"api-url":    apiUrl,
+		"access-key": "key",
+	}
+
+	for _, testcase := range []struct {
+		name        string
+		expectError bool
+		statusCode  int
+		report      string
+	}{
+		{
+			name:        "success",
+			expectError: false,
+			statusCode:  http.StatusAccepted,
+			report:      `{"success":["redeploy-test-function"]}`,
+		},
+		{
+			name:        "failed-retryable",
+			expectError: true,
+			statusCode:  http.StatusInternalServerError,
+			report:      `{"failed":{"redeploy-test-function":{"error":"Expected status code 202, got 500","retryable":true}}}`,
+		},
+		{
+			name:        "failed-not-retryable",
+			expectError: true,
+			statusCode:  http.StatusPreconditionFailed,
+			report:      `{"failed":{"redeploy-test-function":{"error":"Expected status code 202, got 412","retryable":false}}}`,
+		},
+	} {
+		suite.Run(testcase.name, func() {
+			defer func() {
+				suite.ExecuteNuctl([]string{"delete", "fu", functionName}, nil) // nolint: errcheck
+			}()
+			uniqueSuffix := "-" + xid.New().String()
+			reportPath := path.Join(os.TempDir(), fmt.Sprintf("redeployment-report-%s.json", uniqueSuffix))
+			namedArgs["report-file-path"] = reportPath
+
+			//  import function
+			err := suite.ExecuteNuctl([]string{"import", "fu", functionPath}, nil)
+			suite.Require().NoError(err)
+
+			httpmock.Activate()
+			defer httpmock.DeactivateAndReset()
+
+			httpmock.RegisterResponder("PATCH",
+				fmt.Sprintf("%s/functions/%s", apiUrl, functionName),
+				httpmock.NewStringResponder(testcase.statusCode, ""))
+
+			err = suite.ExecuteNuctl([]string{"beta", "redeploy", functionName, "--save-report"}, namedArgs)
+			if testcase.expectError {
+				suite.Require().Error(err)
+			} else {
+				suite.Require().NoError(err)
+			}
+
+			reportBytes, err := os.ReadFile(reportPath)
+			suite.Require().NoError(err)
+			suite.Require().Equal(testcase.report, string(reportBytes))
+
+		})
+	}
+}
+
 func TestFunctionTestSuite(t *testing.T) {
 	if testing.Short() {
 		return
@@ -1819,4 +2009,5 @@ func TestFunctionTestSuite(t *testing.T) {
 	suite.Run(t, new(functionGetTestSuite))
 	suite.Run(t, new(functionDeleteTestSuite))
 	suite.Run(t, new(functionExportImportTestSuite))
+	suite.Run(t, new(functionRedeployTestSuite))
 }

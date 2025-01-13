@@ -21,7 +21,7 @@ However, without an ingress controller running on your cluster, this will have n
 
 ## Setting up an ingress controller
 
-In this guide, you'll set up a [Træfik](https://docs.traefik.io/) controller, but any type of Kubernetes ingress controller should work. You can read [Træfik's excellent documentation](https://docs.traefik.io/user-guides/crd-acme/), but for the purposes of this guide you can simply run the following commands to set up the controller by using either of the following alternative methods:
+In this guide, you'll set up a [Træfik](https://docs.traefik.io/) controller, but any type of Kubernetes ingress controller should work. You can read [Træfik's excellent documentation](https://doc.traefik.io/traefik/user-guides/crd-acme/), but for the purposes of this guide you can simply run the following commands to set up the controller by using either of the following alternative methods:
 
 - Using `kubectl` to apply the resource YAML files. Note that this installs v1.7, and that the YAML files were removed from newer versions:
   ```sh
@@ -73,7 +73,7 @@ By default, functions initialize the HTTP trigger and register `<function name>/
   ...
   triggers:
     http:
-      maxWorkers: 4
+      numWorkers: 4
       kind: "http"
       attributes:
         ingresses:
@@ -111,7 +111,7 @@ spec:
   runtime: "golang"
   triggers:
     http:
-      maxWorkers: 8
+      numWorkers: 8
       kind: http
       attributes:
         ingresses:
