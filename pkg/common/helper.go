@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,8 +37,10 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
+	"golang.org/x/net/html"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -47,6 +50,7 @@ var SmallLettersAndNumbers = []rune("abcdefghijklmnopqrstuvwxyz1234567890")
 var LettersAndNumbers = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
 var seededRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 var containerHostname string
+var specialCharPattern = regexp.MustCompile(`[^\w@%+=:,./-]`)
 
 // IsFile returns true if the object @ path is a file
 func IsFile(path string) bool {
@@ -71,6 +75,21 @@ func IsDir(path string) bool {
 func FileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// EnsureDirExists checks if the directory exists, creates it if it doesn't
+func EnsureDirExists(ctx context.Context, loggerInstance logger.Logger, dir string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		loggerInstance.DebugWithCtx(ctx,
+			"Creating directory as it does not exist",
+			"directory", dir)
+
+		// we need 755 permission to allow running nuclio function with non-root SecurityContext
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // StringSliceToIntSlice converts slices of strings to slices of int. e.g. ["1", "3"] -> [1, 3]
@@ -121,6 +140,23 @@ func StringSliceContainsStringCaseInsensitive(slice []string, str string) bool {
 	}
 
 	return false
+}
+
+// PrependStringToStringSlice prepends a string to a string slice
+func PrependStringToStringSlice(slice []string, str string) []string {
+	slice = append(slice, "")
+	copy(slice[1:], slice)
+	slice[0] = str
+	return slice
+}
+
+// PrependStringsToStringSlice prepends multiple strings to a string slice
+func PrependStringsToStringSlice(slice []string, strs ...string) []string {
+	totalLen := len(slice) + len(strs)
+	slice = append(slice, make([]string, len(strs))...)
+	copy(slice[len(strs):], slice)
+	copy(slice, strs)
+	return slice[:totalLen]
 }
 
 // RemoveANSIColorsFromString strips out ANSI Colors chars from string
@@ -194,11 +230,11 @@ func retryUntilSuccessful(duration time.Duration,
 	if lastErr != nil {
 
 		// wrap last error
-		return errors.Wrapf(lastErr, timedOutErrorMessage)
+		return errors.Wrapf(lastErr, "%s", timedOutErrorMessage)
 	}
 
 	// duration expired without any last error
-	return errors.Errorf(timedOutErrorMessage)
+	return errors.Errorf("%s", timedOutErrorMessage)
 }
 
 // RunningInContainer returns true if currently running in a container, false otherwise
@@ -398,8 +434,6 @@ func GetSourceDir() string {
 // Quote returns a shell-escaped version of the string s. The returned value
 // is a string that can safely be used as one token in a shell command line.
 func Quote(s string) string {
-	var specialCharPattern = regexp.MustCompile(`[^\w@%+=:,./-]`)
-
 	if len(s) == 0 {
 		return "''"
 	}
@@ -589,4 +623,39 @@ func PopulateFieldsFromValues[T string | bool | int](fieldsToValues map[*T]T) {
 			*field = value
 		}
 	}
+}
+
+// SanitizeResponseData tries to parse byte data as html. if it succeeds, it is returned sanitized,
+// otherwise the original data is returned.
+// func SanitizeResponseData(data []byte) []byte {
+func SanitizeResponseData(data []byte, headers http.Header) []byte {
+	// check if the content type contains html or javascript
+	contentType := headers.Get("Content-Type")
+	if contentType == "" || (!strings.Contains(contentType, "html") && !strings.Contains(contentType, "javascript")) {
+		return data
+	}
+
+	// attempt to parse the input data as HTML
+	_, err := html.Parse(bytes.NewReader(data))
+	if err != nil {
+		// if there is an error in parsing, it's not HTML, return data as is
+		return data
+	}
+
+	// the data is HTML, sanitize it
+	policy := bluemonday.UGCPolicy()
+	sanitizedData := policy.Sanitize(string(data))
+	return []byte(sanitizedData)
+}
+
+// GetFunctionName returns the actual name of a function variable
+func GetFunctionName(function interface{}) string {
+	fullName := runtime.FuncForPC(reflect.ValueOf(function).Pointer()).Name()
+	parts := strings.Split(fullName, ".")
+	shortName := parts[len(parts)-1]
+
+	// Methods passed by reference have a suffix of "-fm"
+	shortName = strings.TrimSuffix(shortName, "-fm")
+
+	return shortName
 }

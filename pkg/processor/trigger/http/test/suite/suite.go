@@ -145,7 +145,13 @@ func (suite *TestSuite) DeployFunctionAndRequests(createFunctionOptions *platfor
 		for _, request := range requests {
 			request.Enrich(deployResult)
 			suite.Logger.DebugWith("Sending request",
-				"requestBody", request.RequestBody,
+				"requestBody", func() string {
+					if len(request.RequestBody) > 256 {
+						// Truncate to 256 characters and append "..."
+						return request.RequestBody[:256] + "..."
+					}
+					return request.RequestBody
+				}(),
 				"expectedResponseStatusCode", request.ExpectedResponseStatusCode)
 			if !suite.SendRequestVerifyResponse(request) {
 
@@ -193,9 +199,8 @@ func (suite *TestSuite) SendRequestVerifyResponse(request *Request) bool {
 		return false
 	}
 
-	suite.Logger.DebugWith("Got response", "statusCode", httpResponse.StatusCode)
-
 	suite.Require().NoError(err, "Failed to send request")
+	suite.Logger.DebugWith("Got response", "statusCode", httpResponse.StatusCode)
 
 	body, err := io.ReadAll(httpResponse.Body)
 	suite.Require().NoError(err)

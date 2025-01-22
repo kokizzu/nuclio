@@ -14,6 +14,7 @@
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -34,6 +35,10 @@ class Constants:
 
     # in msgpack protoctol, binary messages' length is 4 bytes long
     msgpack_message_length_bytes = 4
+
+    termination_signal = signal.SIGUSR1
+    drain_signal = signal.SIGUSR2
+    continue_signal = signal.SIGCONT
 
 
 class WrapperFatalException(Exception):
@@ -82,8 +87,6 @@ class Wrapper(object):
         # holds the function that will be called
         self._entrypoint = self._load_entrypoint_from_handler(handler)
 
-        self._is_entrypoint_coroutine = asyncio.iscoroutinefunction(self._entrypoint)
-
         # connect to processor
         self._event_sock = self._connect_to_processor(self._event_socket_path)
         self._control_sock = self._connect_to_processor(self._control_socket_path)
@@ -92,10 +95,10 @@ class Wrapper(object):
         self._event_sock_wfile = self._event_sock.makefile('w')
         self._control_sock_wfile = self._control_sock.makefile('w')
 
-        # if we're in a coroutine - set socket to non-blocking
-        if self._is_entrypoint_coroutine:
-            self._event_sock.setblocking(False)
-            self._control_sock.setblocking(False)
+        # set socket to nonblocking to allow the asyncio event loop to run while we're waiting on a socket, and so
+        # that we are able to cancel the wait if needed
+        self._event_sock.setblocking(False)
+        self._control_sock.setblocking(False)
 
         # create msgpack unpacker
         self._unpacker = self._resolve_unpacker()
@@ -121,30 +124,38 @@ class Wrapper(object):
         # initialize flags
         self._is_drain_needed = False
         self._is_termination_needed = False
-        self._is_waiting_for_event = False
+        self._discard_events = False
+
+        self._event_message_length_task = None
 
     async def serve_requests(self, num_requests=None):
         """Read event from socket, send out reply"""
 
         while True:
             try:
-                self._is_waiting_for_event = True
-
                 # resolve event message length
-                event_message_length = await self._resolve_event_message_length(self._event_sock)
+                self._event_message_length_task = asyncio.create_task(
+                    self._resolve_event_message_length(self._event_sock)
+                )
+                event_message_length = await self._event_message_length_task
 
-                self._is_waiting_for_event = False
+                self._event_message_length_task = None
 
                 # resolve event message
                 event = await self._resolve_event(self._event_sock, event_message_length)
 
-                try:
+                # do not handle an event if a worker is drained
+                if not self._discard_events:
+                    try:
+                        # handle event
+                        await self._handle_event(event)
+                    except BaseException as exc:
+                        await self._on_handle_event_error(exc)
+                else:
+                    self._logger.debug_with('Event has been discarded', event=event)
 
-                    # handle event
-                    await self._handle_event(event)
-
-                except BaseException as exc:
-                    await self._on_handle_event_error(exc)
+                # allow event to be garbage collected by deleting the reference
+                del event
 
             except WrapperFatalException as exc:
                 await self._on_serving_error(exc)
@@ -159,14 +170,22 @@ class Wrapper(object):
                 self._unpacker = self._resolve_unpacker()
                 await self._on_serving_error(exc)
 
+            except asyncio.CancelledError:
+                self._logger.debug('Waiting for event message was interrupted by a signal')
+
             except Exception as exc:
                 await self._on_serving_error(exc)
 
             finally:
                 if self._is_drain_needed:
-                    self._call_drain_handler()
+                    result = self._call_drain_handler()
+                    if asyncio.iscoroutine(result):
+                        await result
+
                 if self._is_termination_needed:
-                    self._call_termination_handler()
+                    result = self._call_termination_handler()
+                    if asyncio.iscoroutine(result):
+                        await result
 
             # for testing, we can ask wrapper to only read a set number of requests
             if num_requests is not None:
@@ -212,47 +231,53 @@ class Wrapper(object):
                 raise
 
     def _register_to_signal(self):
-        signal.signal(signal.SIGUSR1, self._on_termination_signal)
-        signal.signal(signal.SIGUSR2, self._on_drain_signal)
+        on_termination_signal = functools.partial(self._on_termination_signal, Constants.termination_signal.name)
+        on_drain_signal = functools.partial(self._on_drain_signal, Constants.drain_signal.name)
+        on_continue_signal = functools.partial(self._on_continue_signal, Constants.continue_signal.name)
 
-    def _on_drain_signal(self, signal_number, frame):
-        self._logger.debug_with('Received signal, calling draining callback',
-                                signal=signal.Signals(signal_number).name)
+        asyncio.get_running_loop().add_signal_handler(Constants.termination_signal, on_termination_signal)
+        asyncio.get_running_loop().add_signal_handler(Constants.drain_signal, on_drain_signal)
+        asyncio.get_running_loop().add_signal_handler(Constants.continue_signal, on_continue_signal)
 
-        if self._is_waiting_for_event:
-            self._logger.debug('Wrapper is waiting for an event, calling drain handler')
+    def _on_drain_signal(self, signal_name):
+        # do not perform draining if discarding events
+        if self._discard_events:
+            self._logger.debug('Draining signal is received, but it will be ignored as the worker is already drained')
+            return
 
-            # call the drain handler here as the event loop is stuck waiting for an event
-            self._call_drain_handler()
-        else:
-            self._logger.debug('Wrapper is handling an event, setting drain flag to true')
+        self._logger.debug_with('Received signal', signal=signal_name)
+        self._is_drain_needed = True
 
-            # set the flag to true so the event loop will call the drain handler
-            # after the current event is handled
-            self._is_drain_needed = True
+        # set the flag to True to stop processing events which are received after draining
+        self._discard_events = True
 
-    def _on_termination_signal(self, signal_number, frame):
-        self._logger.debug_with('Received signal, calling termination callback',
-                                signal=signal.Signals(signal_number).name)
+        # if serving loop is waiting for an event, unblock this operation to allow the drain callback to be called
+        if self._event_message_length_task:
+            self._event_message_length_task.cancel()
 
-        if self._is_waiting_for_event:
-            self._logger.debug('Wrapper is waiting for an event, calling termination handler')
+    def _on_termination_signal(self, signal_name):
+        self._logger.debug_with('Received signal', signal=signal_name)
+        self._is_termination_needed = True
 
-            # call the termination handler here as the event loop is stuck waiting for an event
-            self._call_termination_handler()
-        else:
-            self._logger.debug('Wrapper is handling an event, setting termination flag to true')
+        # set the flag to True to stop processing events which are received after termination signal
+        self._discard_events = True
 
-            # set the flag to true so the event loop will call the termination handler
-            # after the current event is handled
-            self._is_termination_needed = True
+        # if serving loop is waiting for an event, unblock this operation to allow the termination callback to be called
+        if self._event_message_length_task:
+            self._event_message_length_task.cancel()
+
+    def _on_continue_signal(self, signal_name):
+        self._logger.debug_with('Received signal', signal=signal_name)
+
+        # set this flag to False, so continue normal event processing flow
+        self._discard_events = False
 
     def _call_drain_handler(self):
         self._logger.debug('Calling platform drain handler')
 
         # set the flag to False so the drain handler will not be called more than once
         self._is_drain_needed = False
-        self._platform._on_signal(callback_type="drain")
+        return self._platform._on_signal(callback_type="drain")
 
     def _call_termination_handler(self):
         self._logger.debug('Calling platform termination handler')
@@ -263,7 +288,7 @@ class Wrapper(object):
         # call termination handler
         # TODO: send a control message to the processor after this line,
         # to indicate that the termination handler has finished, and the processor can exit early
-        self._platform._on_signal(callback_type="termination")
+        return self._platform._on_signal(callback_type="termination")
 
     async def _send_data_on_control_socket(self, data):
         self._logger.debug_with('Sending data on control socket', data_length=len(data))
@@ -320,7 +345,11 @@ class Wrapper(object):
 
         for _ in range(timeout):
             try:
+                # TODO: remove this log when support multiple sockets as it can be too spammy
+                self._logger.debug(f"Connecting to socket {socket_path}")
                 sock.connect(socket_path)
+                # TODO: remove this log when support multiple sockets as it can be too spammy
+                self._logger.debug(f"Successfully connected to socket {socket_path}")
                 return sock
 
             except:
@@ -333,20 +362,13 @@ class Wrapper(object):
         raise RuntimeError('Failed to connect to {0} in given timeframe'.format(socket_path))
 
     async def _write_packet_to_processor(self, sock, body):
-
-        if self._is_entrypoint_coroutine:
-            await self._loop.sock_sendall(sock, (body + '\n').encode('utf-8'))
-        else:
-            sock.sendall((body + '\n').encode('utf-8'))
+        await self._loop.sock_sendall(sock, (body + '\n').encode('utf-8'))
 
     async def _resolve_event_message_length(self, sock):
         """
         Determines the message body size
         """
-        if self._is_entrypoint_coroutine:
-            int_buf = await self._loop.sock_recv(sock, Constants.msgpack_message_length_bytes)
-        else:
-            int_buf = sock.recv(Constants.msgpack_message_length_bytes)
+        int_buf = await self._loop.sock_recv(sock, Constants.msgpack_message_length_bytes)
 
         # not reading 4 bytes meaning client has disconnected while sending the packet. bail
         if len(int_buf) != 4:
@@ -370,10 +392,7 @@ class Wrapper(object):
         cumulative_bytes_read = 0
         while cumulative_bytes_read < expected_event_bytes_length:
             bytes_to_read_now = expected_event_bytes_length - cumulative_bytes_read
-            if self._is_entrypoint_coroutine:
-                bytes_read = await self._loop.sock_recv(sock, bytes_to_read_now)
-            else:
-                bytes_read = sock.recv(bytes_to_read_now)
+            bytes_read = await self._loop.sock_recv(sock, bytes_to_read_now)
 
             if not bytes_read:
                 raise WrapperFatalException('Client disconnected')
@@ -430,14 +449,23 @@ class Wrapper(object):
 
         await self._write_packet_to_processor(self._event_sock, 'm' + json.dumps({'duration': duration}))
 
-        response = nuclio_sdk.Response.from_entrypoint_output(self._json_encoder.encode,
-                                                              entrypoint_output)
-
         # try to json encode the response
-        encoded_response = self._json_encoder.encode(response)
+        encoded_response = self._encode_entrypoint_output(entrypoint_output)
 
         # write response to the socket
         await self._write_packet_to_processor(self._event_sock, 'r' + encoded_response)
+
+    def _encode_entrypoint_output(self, entrypoint_output):
+
+        # processing entrypoint output if response is batched
+        if isinstance(entrypoint_output, list):
+            response = [nuclio_sdk.Response.from_entrypoint_output(self._json_encoder.encode,
+                                                                   _output) for _output in entrypoint_output]
+        else:
+            response = nuclio_sdk.Response.from_entrypoint_output(self._json_encoder.encode, entrypoint_output)
+
+        # try to json encode the response
+        return self._json_encoder.encode(response)
 
     def _shutdown(self, error_code=0):
         print('Shutting down')

@@ -44,6 +44,10 @@ func (mr *MockRuntime) ProcessEvent(event nuclio.Event, functionLogger logger.Lo
 func (mr *MockRuntime) GetFunctionLogger() logger.Logger {
 	return nil
 }
+func (mr *MockRuntime) ProcessBatch(batch []nuclio.Event, functionLogger logger.Logger) ([]*runtime.ResponseWithErrors, error) {
+	args := mr.Called(batch, functionLogger)
+	return args.Get(0).([]*runtime.ResponseWithErrors), args.Error(1)
+}
 
 func (mr *MockRuntime) GetStatistics() *runtime.Statistics {
 	return nil
@@ -82,6 +86,11 @@ func (mr *MockRuntime) Drain() error {
 }
 
 func (mr *MockRuntime) Terminate() error {
+	args := mr.Called()
+	return args.Error(0)
+}
+
+func (mr *MockRuntime) Continue() error {
 	args := mr.Called()
 	return args.Error(0)
 }

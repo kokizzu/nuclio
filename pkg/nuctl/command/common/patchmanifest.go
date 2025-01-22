@@ -19,6 +19,7 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 
@@ -83,7 +84,7 @@ func (m *PatchManifest) AddFailure(name string, err error, retryable bool) {
 	defer m.lock.Unlock()
 
 	m.Failed[name] = failDescription{
-		Err:       err.Error(),
+		Err:       errors.RootCause(err).Error(),
 		Retryable: retryable,
 	}
 }
@@ -148,6 +149,25 @@ func (m *PatchManifest) SaveToFile(ctx context.Context, loggerInstance logger.Lo
 		loggerInstance.WarnWithCtx(ctx,
 			"Some functions failed to patch. To retry redeploying them, rerun the command with the \"--from-report\" flag")
 	}
+}
+
+func (m *PatchManifest) SprintfError() string {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if len(m.Failed) == 0 {
+		return ""
+	}
+	errorString := "Failed to redeploy some functions. "
+
+	for name, reason := range m.Failed {
+		errorString += fmt.Sprintf(
+			"Failed to redeploy function `%s`.\n\tReason: `%s`.\n\tRetryable: %t.\n",
+			name,
+			reason.Err,
+			reason.Retryable)
+	}
+	return errorString
 }
 
 func readManifestFromFile(path string) (*patchManifest, error) {

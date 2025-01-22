@@ -118,53 +118,22 @@ func (i *importCommandeer) importFunction(ctx context.Context, functionConfig *f
 	createFunctionCtx := context.WithoutCancel(ctx)
 	_, err = i.rootCommandeer.platform.CreateFunction(createFunctionCtx,
 		&platform.CreateFunctionOptions{
-			Logger:         i.rootCommandeer.loggerInstance,
-			FunctionConfig: *functionConfig,
+			Logger:               i.rootCommandeer.loggerInstance,
+			FunctionConfig:       *functionConfig,
+			AutofixConfiguration: !skipAutofix,
 		})
-
-	if err != nil && !skipAutofix {
-		typedErr := err.(*errors.Error)
-		return i.retryImportWithAutofix(ctx, functionConfig, typedErr)
-	}
 
 	return err
 }
 
-func (i *importCommandeer) retryImportWithAutofix(ctx context.Context, functionConfig *functionconfig.Config, err *errors.Error) error {
-	// TODO: add maxRetry value
-	var fixable bool
-
-	// TODO: move this block to separate function
-	if strings.Contains(errors.GetErrorStackString(err, 10), "V3IO Stream trigger does not support autoscaling") {
-		i.rootCommandeer.loggerInstance.WarnWithCtx(ctx, "Setting maxReplicas to minReplicas for function",
-			"function", functionConfig.Meta.Name)
-		functionConfig.Spec.MaxReplicas = functionConfig.Spec.MinReplicas
-		fixable = true
-	}
-	if fixable {
-		i.rootCommandeer.loggerInstance.WarnWithCtx(ctx, "Function import failed, retrying",
-			"function", functionConfig.Meta.Name,
-			"error", err.Error())
-
-		_, creationErr := i.rootCommandeer.platform.CreateFunction(ctx,
-			&platform.CreateFunctionOptions{
-				Logger:         i.rootCommandeer.loggerInstance,
-				FunctionConfig: *functionConfig,
-			})
-		if creationErr == nil {
-			i.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Function import was successful on second attempt",
-				"function", functionConfig.Meta.Name)
-		} else {
-			i.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Function import has failed on second attempt",
-				"function", functionConfig.Meta.Name,
-				"error", creationErr.Error())
+func (i *importCommandeer) isAutoFixable(err error) bool {
+	for _, fixableError := range functionconfig.FixableValidationErrors {
+		if strings.Contains(strings.ToLower(errors.GetErrorStackString(err, 10)),
+			strings.ToLower(fixableError)) {
+			return true
 		}
-		return creationErr
 	}
-	i.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Function import failed and config cannot be auto fixed",
-		"function", functionConfig.Meta.Name)
-
-	return err
+	return false
 }
 
 func (i *importCommandeer) importFunctions(ctx context.Context,
@@ -186,7 +155,7 @@ func (i *importCommandeer) importFunctions(ctx context.Context,
 				"project", project.Meta.Name)
 
 			if err := i.importFunction(ctx, function, project, i.skipAutofix); err != nil {
-				report.AddFailure(function.Meta.Name, err)
+				report.AddFailure(function.Meta.Name, err, i.isAutoFixable(err))
 				i.rootCommandeer.loggerInstance.ErrorWithCtx(ctx,
 					"Failed to import function",
 					"function", function.Meta.Name,
@@ -207,7 +176,7 @@ func (i *importCommandeer) importFunctions(ctx context.Context,
 
 	if errorReport := report.SprintfError(); errorReport != "" {
 		return errors.New(fmt.Sprintf(
-			"Import failed for some of the functions. Project: `%s`.",
+			"Import failed for some of the functions in project `%s`.",
 			project.Meta.Name),
 		)
 	}
@@ -241,7 +210,7 @@ Arguments:
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// initialize root
-			if err := importCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := importCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -276,7 +245,11 @@ Use --help for more information`)
 				},
 			}
 
-			return commandeer.importFunctions(ctx, functionConfigs, platformConfig, commandeer.report)
+			err = commandeer.importFunctions(ctx, functionConfigs, platformConfig, commandeer.report)
+			if commandeer.saveReport {
+				commandeer.report.SaveToFile(ctx, commandeer.rootCommandeer.loggerInstance, commandeer.reportFilePath)
+			}
+			return err
 		},
 	}
 
@@ -317,9 +290,6 @@ type importProjectCommandeer struct {
 	skipProjectNames   []string
 	skipLabelSelectors string
 	report             *nuctlcommon.ProjectReports
-
-	// Deprecated.
-	skipTransformDisplayName bool
 }
 
 func newImportProjectCommandeer(ctx context.Context, importCommandeer *importCommandeer) *importProjectCommandeer {
@@ -345,7 +315,7 @@ Arguments:
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// initialize root
-			if err := importCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := importCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -383,10 +353,6 @@ Use --help for more information`)
 
 	cmd.Flags().StringSliceVar(&commandeer.skipProjectNames, "skip", []string{}, "Names of projects to skip (don't import), as a comma-separated list")
 	cmd.Flags().StringVar(&commandeer.skipLabelSelectors, "skip-label-selectors", "", "Kubernetes label-selectors filter that identifies projects to skip (don't import)")
-
-	// Deprecated. display name is longer a project's property.
-	cmd.Flags().BoolVar(&commandeer.skipTransformDisplayName, "skip-transform-display-name", false, "Skip replacing 'spec.displayName' with 'metadata.name' in the imported configuration when 'metadata.name' isn't set or is set as a UUID")
-	cmd.Flags().MarkDeprecated("skip-transform-display-name", "Display name has been deprecated on versions < 1.6.0, use nuctl at version 1.5.16 to transform project with display name") // // nolint: errcheck
 
 	commandeer.cmd = cmd
 

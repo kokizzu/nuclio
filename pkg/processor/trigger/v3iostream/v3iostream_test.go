@@ -19,6 +19,7 @@ limitations under the License.
 package v3iostream
 
 import (
+	"os"
 	"testing"
 
 	"github.com/nuclio/nuclio/pkg/functionconfig"
@@ -53,43 +54,71 @@ func (suite *TestSuite) TestExplicitAckModeWithWorkerAllocationModes() {
 		name                 string
 		explicitAckMode      functionconfig.ExplicitAckMode
 		workerAllocationMode partitionworker.AllocationMode
+		runtime              string
 		expectedFailure      bool
 	}{
 		{
-			name:                 "Disable-Static",
+			name:                 "Python-Disable-Static",
 			explicitAckMode:      functionconfig.ExplicitAckModeDisable,
 			workerAllocationMode: partitionworker.AllocationModeStatic,
+			runtime:              "python",
 			expectedFailure:      false,
 		},
 		{
-			name:                 "Disable-Pool",
+			name:                 "Python-Disable-Pool",
 			explicitAckMode:      functionconfig.ExplicitAckModeDisable,
 			workerAllocationMode: partitionworker.AllocationModePool,
+			runtime:              "python",
 			expectedFailure:      false,
 		},
 		{
-			name:                 "Enable-Static",
+			name:                 "Python-Enable-Static",
 			explicitAckMode:      functionconfig.ExplicitAckModeEnable,
 			workerAllocationMode: partitionworker.AllocationModeStatic,
+			runtime:              "python",
 			expectedFailure:      false,
 		},
 		{
-			name:                 "Enable-Pool",
+			name:                 "Python-Enable-Pool",
 			explicitAckMode:      functionconfig.ExplicitAckModeEnable,
 			workerAllocationMode: partitionworker.AllocationModePool,
+			runtime:              "python3.9",
 			expectedFailure:      true,
 		},
 		{
-			name:                 "ExplicitOnly-Static",
+			name:                 "Python-ExplicitOnly-Static",
 			explicitAckMode:      functionconfig.ExplicitAckModeExplicitOnly,
 			workerAllocationMode: partitionworker.AllocationModeStatic,
+			runtime:              "python3.10",
 			expectedFailure:      false,
 		},
 		{
-			name:                 "ExplicitOnly-Pool",
+			name:                 "Python-ExplicitOnly-Pool",
+			explicitAckMode:      functionconfig.ExplicitAckModeExplicitOnly,
+			workerAllocationMode: partitionworker.AllocationModePool,
+			runtime:              "python",
+			expectedFailure:      true,
+		},
+		{
+			name:                 "Golang-Enable-Pool",
 			explicitAckMode:      functionconfig.ExplicitAckModeEnable,
 			workerAllocationMode: partitionworker.AllocationModePool,
-			expectedFailure:      true,
+			runtime:              "golang",
+			expectedFailure:      false,
+		},
+		{
+			name:                 "Golang-ExplicitOnly-Pool",
+			explicitAckMode:      functionconfig.ExplicitAckModeExplicitOnly,
+			workerAllocationMode: partitionworker.AllocationModePool,
+			runtime:              "golang",
+			expectedFailure:      false,
+		},
+		{
+			name:                 "Golang-ExplicitOnly-Static",
+			explicitAckMode:      functionconfig.ExplicitAckModeExplicitOnly,
+			workerAllocationMode: partitionworker.AllocationModeStatic,
+			runtime:              "golang",
+			expectedFailure:      false,
 		},
 	} {
 		suite.Run(testCase.name, func() {
@@ -112,6 +141,9 @@ func (suite *TestSuite) TestExplicitAckModeWithWorkerAllocationModes() {
 									"nuclio.io/v3iostream-explicit-ack-mode": string(testCase.explicitAckMode),
 								},
 							},
+							Spec: functionconfig.Spec{
+								Runtime: testCase.runtime,
+							},
 						},
 					},
 				},
@@ -121,6 +153,89 @@ func (suite *TestSuite) TestExplicitAckModeWithWorkerAllocationModes() {
 			} else {
 				suite.Require().NoError(err)
 			}
+		})
+	}
+}
+
+func (suite *TestSuite) TestSecretEnrichment() {
+	accessKeyEnvVarKey := "V3IO_ACCESS_KEY"
+	accessKeyEnvVarValue := "21b06552-47a7-433a-8f5a-46649bf6d326"
+	err := os.Setenv(accessKeyEnvVarKey, accessKeyEnvVarValue)
+	suite.Require().NoError(err)
+
+	customUuid := "fea2871b-02a4-4128-9957-b870e3b5e936"
+	generate := "$generate"
+
+	for _, testCase := range []struct {
+		name             string
+		Password         string
+		Username         string
+		Secret           string
+		expectedPassword string
+		expectedUsername string
+		expectedSecret   string
+	}{
+		{
+			name:           "uuid",
+			Password:       customUuid,
+			Username:       "some-username",
+			Secret:         "some-secret",
+			expectedSecret: customUuid,
+		},
+		{
+			name:           "generate",
+			Password:       generate,
+			Username:       "some-username",
+			expectedSecret: accessKeyEnvVarValue,
+		},
+		{
+			name:           "generateWithSecret",
+			Password:       generate,
+			Username:       "some-username",
+			Secret:         "some-secret",
+			expectedSecret: accessKeyEnvVarValue,
+		},
+		{
+			name:             "regular",
+			Password:         "some-password",
+			Username:         "some-username",
+			Secret:           "some-secret",
+			expectedPassword: "some-password",
+			expectedUsername: "some-username",
+			expectedSecret:   "some-secret",
+		},
+		{
+			name: "empty",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			config, err := NewConfiguration(testCase.name,
+				&functionconfig.Trigger{
+					Password: testCase.Password,
+					Username: testCase.Username,
+					Secret:   testCase.Secret,
+					// populate some dummy values
+					Attributes: map[string]interface{}{
+						"containerName": "my-container",
+						"streamPath":    "/my-stream",
+						"consumerGroup": "some-cg",
+					},
+				},
+				&runtime.Configuration{
+					Configuration: &processor.Configuration{
+						Config: functionconfig.Config{
+							Meta: functionconfig.Meta{
+								Annotations: map[string]string{},
+							},
+						},
+					},
+				},
+				suite.logger)
+			suite.Require().NoError(err)
+
+			suite.Require().Equal(testCase.expectedPassword, config.Password)
+			suite.Require().Equal(testCase.expectedUsername, config.Username)
+			suite.Require().Equal(testCase.expectedSecret, config.Secret)
 		})
 	}
 }

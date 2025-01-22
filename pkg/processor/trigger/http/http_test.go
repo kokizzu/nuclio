@@ -22,10 +22,13 @@ import (
 	"context"
 	"net"
 	nethttp "net/http"
+	"strings"
 	"testing"
 
 	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/common/status"
+	"github.com/nuclio/nuclio/pkg/functionconfig"
+	"github.com/nuclio/nuclio/pkg/processor/runtime"
 	"github.com/nuclio/nuclio/pkg/processor/trigger"
 	"github.com/nuclio/nuclio/pkg/processor/trigger/http/cors"
 
@@ -51,6 +54,7 @@ func (suite *TestSuite) SetupSuite() {
 			Logger: suite.logger,
 		},
 		configuration: &Configuration{},
+		status:        status.NewSafeStatus(status.Ready),
 	}
 	suite.fastDummyHTTPServer = fasthttputil.NewInmemoryListener()
 	suite.serveDummyHTTPServer(suite.trigger.onRequestFromFastHTTP())
@@ -137,7 +141,7 @@ func (suite *TestSuite) TestCORS() {
 		suite.trigger.Statistics.EventsHandledFailureTotal = 0
 
 		// ensure trigger is ready
-		suite.trigger.status = status.Ready
+		suite.trigger.status.SetStatus(status.Ready)
 
 		// create request, use OPTIONS to trigger preflight flow
 		request, err := nethttp.NewRequest(fasthttp.MethodOptions, "http://foo.bar/", nil)
@@ -190,7 +194,7 @@ func (suite *TestSuite) TestInternalHealthiness() {
 			suite.logger.DebugWith("Testing internal healthiness endpoint", "testCase", testCase)
 
 			// ensure trigger is ready
-			suite.trigger.status = status.Ready
+			suite.trigger.status.SetStatus(status.Ready)
 
 			request, err := nethttp.NewRequest(nethttp.MethodGet,
 				"http://foo.bar"+string(suite.trigger.internalHealthPath),
@@ -207,6 +211,62 @@ func (suite *TestSuite) TestInternalHealthiness() {
 			suite.Require().Equal(response.StatusCode, nethttp.StatusOK)
 		})
 
+	}
+}
+
+func (suite *TestSuite) TestHttpTriggerMode() {
+	for _, testCase := range []struct {
+		name         string
+		config       string
+		expectedMode TriggerMode
+	}{
+		{name: "async-mode",
+			config: `
+metadata:
+  name: python handler
+spec:
+  triggers:
+    http:
+      attributes:
+        mode: async
+`,
+			expectedMode: TriggerModeAsync},
+		{name: "mode-not-defined",
+			config: `
+metadata:
+  name: python handler
+spec:
+  triggers:
+    http:
+`,
+			expectedMode: TriggerModeSync,
+		},
+		{name: "sync-mode",
+			config: `
+metadata:
+  name: python handler
+spec:
+  triggers:
+    http:
+      attributes:
+        mode: sync
+`,
+			expectedMode: TriggerModeSync,
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			config := functionconfig.Config{}
+			reader, err := functionconfig.NewReader(suite.logger)
+			suite.Require().NoError(err, "Can't create reader")
+
+			err = reader.Read(strings.NewReader(testCase.config), "processor", &config)
+			suite.Require().NoError(err, "Can't reader configuration")
+
+			httpTrigger := config.Spec.Triggers["http"]
+			httpConfig, err := NewConfiguration("id", &httpTrigger, &runtime.Configuration{})
+			suite.Require().NoError(err)
+			suite.Require().Equal(httpConfig.Mode, testCase.expectedMode)
+		})
 	}
 }
 

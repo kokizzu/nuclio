@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/errgroup"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform/abstract"
@@ -59,15 +60,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
-)
-
-const (
-	ContainerHTTPPortName   = "http"
-	containerMetricPort     = 8090
-	containerMetricPortName = "metrics"
 )
 
 type deploymentResourceMethod string
@@ -179,8 +175,8 @@ func (lc *lazyClient) CreateOrUpdate(ctx context.Context,
 
 	// TODO: remove when versioning is back in
 	function.Spec.Version = -1
-	function.Spec.Alias = "latest"
-	functionLabels[common.NuclioLabelKeyFunctionVersion] = "latest"
+	function.Spec.Alias = common.FunctionTagLatest
+	functionLabels[common.NuclioLabelKeyFunctionVersion] = common.FunctionTagLatest
 
 	resources := lazyResources{}
 
@@ -247,6 +243,29 @@ func (lc *lazyClient) CreateOrUpdate(ctx context.Context,
 		"functionName", function.Name,
 		"functionNamespace", function.Namespace)
 	return &resources, nil
+}
+
+func (lc *lazyClient) UpdatedServiceSelectorWhenScaledFromZero(ctx context.Context,
+	function *nuclioio.NuclioFunction) error {
+	// get labels from the function and add class labels
+	functionLabels := lc.getFunctionLabels(function)
+
+	functionLabels[common.NuclioResourceLabelKeyFunctionName] = function.Name
+	functionLabels[common.NuclioLabelKeyFunctionVersion] = common.FunctionTagLatest
+
+	// marshal labels to json
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"selector": functionLabels,
+		},
+	})
+	if err != nil {
+		return errors.Wrap(err, "Failed to marshal selector when patching service")
+	}
+	if err := lc.patchService(ctx, function, patchBytes); err != nil {
+		return errors.Wrap(err, "Failed to patch service selector")
+	}
+	return nil
 }
 
 func (lc *lazyClient) WaitAvailable(ctx context.Context,
@@ -601,10 +620,10 @@ func (lc *lazyClient) waitFunctionDeploymentReadiness(ctx context.Context,
 		}
 
 		// fail-fast mechanism
-		if err := lc.resolveFailFast(ctx,
+		if failedStatus, err := lc.resolveFailFast(ctx,
 			podsList,
 			functionResourcesCreateOrUpdateTimestamp); err != nil {
-			return errors.Wrapf(err, "NuclioFunction deployment failed"), functionconfig.FunctionStateError
+			return errors.Wrapf(err, "NuclioFunction deployment failed"), failedStatus
 		}
 	}
 
@@ -1035,6 +1054,18 @@ func (lc *lazyClient) createOrUpdateService(ctx context.Context,
 	return resource.(*v1.Service), err
 }
 
+func (lc *lazyClient) patchService(ctx context.Context, function *nuclioio.NuclioFunction, patchBytes []byte) error {
+	if _, err := lc.kubeClientSet.CoreV1().Services(function.Namespace).Patch(
+		ctx,
+		kube.ServiceNameFromFunctionName(function.Name),
+		types.StrategicMergePatchType,
+		patchBytes,
+		metav1.PatchOptions{}); err != nil {
+		return errors.Wrap(err, "Failed to patch service")
+	}
+	return nil
+}
+
 func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 	functionLabels labels.Set,
 	imagePullSecrets string,
@@ -1105,7 +1136,7 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 					SecurityContext:    function.Spec.SecurityContext,
 					Affinity:           function.Spec.Affinity,
 					Tolerations:        function.Spec.Tolerations,
-					NodeSelector:       function.Spec.NodeSelector,
+					NodeSelector:       function.Status.EnrichedNodeSelector,
 					NodeName:           function.Spec.NodeName,
 					PriorityClassName:  function.Spec.PriorityClassName,
 					PreemptionPolicy:   function.Spec.PreemptionPolicy,
@@ -1121,34 +1152,7 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 			}
 		}
 
-		// create init containers if provided
-		if len(function.Spec.InitContainers) > 0 {
-			deploymentSpec.Template.Spec.InitContainers = make([]v1.Container, 0, len(function.Spec.InitContainers))
-			for _, initContainer := range function.Spec.InitContainers {
-				lc.logger.DebugWithCtx(ctx,
-					"Creating init container",
-					"functionName", function.Name,
-					"initContainer", initContainer.Name)
-				lc.platformConfigurationProvider.GetPlatformConfiguration().EnrichSupplementaryContainerResources(ctx,
-					lc.logger,
-					&initContainer.Resources)
-				initContainer.VolumeMounts = volumeMounts
-				deploymentSpec.Template.Spec.InitContainers = append(deploymentSpec.Template.Spec.InitContainers, *initContainer)
-			}
-		}
-
-		// create sidecars if provided
-		for _, sidecarSpec := range function.Spec.Sidecars {
-			lc.logger.DebugWithCtx(ctx,
-				"Creating sidecar container",
-				"functionName", function.Name,
-				"sidecarName", sidecarSpec.Name)
-			lc.platformConfigurationProvider.GetPlatformConfiguration().EnrichSupplementaryContainerResources(ctx,
-				lc.logger,
-				&sidecarSpec.Resources)
-			sidecarSpec.VolumeMounts = volumeMounts
-			deploymentSpec.Template.Spec.Containers = append(deploymentSpec.Template.Spec.Containers, *sidecarSpec)
-		}
+		lc.populateSupplementaryContainers(ctx, function, &deploymentSpec, volumeMounts)
 
 		deployment := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1213,7 +1217,7 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 
 		deployment.Spec.Template.Spec.Tolerations = function.Spec.Tolerations
 		deployment.Spec.Template.Spec.Affinity = function.Spec.Affinity
-		deployment.Spec.Template.Spec.NodeSelector = function.Spec.NodeSelector
+		deployment.Spec.Template.Spec.NodeSelector = function.Status.EnrichedNodeSelector
 		deployment.Spec.Template.Spec.NodeName = function.Spec.NodeName
 		deployment.Spec.Template.Spec.PriorityClassName = function.Spec.PriorityClassName
 		deployment.Spec.Template.Spec.PreemptionPolicy = function.Spec.PreemptionPolicy
@@ -1224,6 +1228,8 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 				{Name: imagePullSecrets},
 			}
 		}
+
+		lc.populateSupplementaryContainers(ctx, function, &deployment.Spec, volumeMounts)
 
 		// enrich deployment spec with default fields that were passed inside the platform configuration
 		// performed on update too, in case the platform config has been modified after the creation of this deployment
@@ -1246,6 +1252,47 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 	}
 
 	return resource.(*appsv1.Deployment), err
+}
+
+func (lc *lazyClient) populateSupplementaryContainers(ctx context.Context,
+	function *nuclioio.NuclioFunction,
+	deploymentSpec *appsv1.DeploymentSpec,
+	volumeMounts []v1.VolumeMount) {
+
+	// create init containers if provided
+	if len(function.Spec.InitContainers) > 0 {
+		deploymentSpec.Template.Spec.InitContainers = make([]v1.Container, 0, len(function.Spec.InitContainers))
+		for _, initContainer := range function.Spec.InitContainers {
+			lc.logger.DebugWithCtx(ctx,
+				"Creating init container",
+				"functionName", function.Name,
+				"initContainer", initContainer.Name)
+			lc.platformConfigurationProvider.GetPlatformConfiguration().EnrichSupplementaryContainerResources(ctx,
+				lc.logger,
+				&initContainer.Resources)
+			initContainer.VolumeMounts = volumeMounts
+
+			deploymentSpec.Template.Spec.InitContainers = append(deploymentSpec.Template.Spec.InitContainers, *initContainer)
+		}
+	}
+
+	// remove the sidecar containers from the container list if any, and keep the first container
+	// we will add the sidecars later
+	deploymentSpec.Template.Spec.Containers = deploymentSpec.Template.Spec.Containers[:1]
+
+	// create sidecars if provided
+	for _, sidecarSpec := range function.Spec.Sidecars {
+		lc.logger.DebugWithCtx(ctx,
+			"Creating sidecar container",
+			"functionName", function.Name,
+			"sidecarName", sidecarSpec.Name)
+		lc.platformConfigurationProvider.GetPlatformConfiguration().EnrichSupplementaryContainerResources(ctx,
+			lc.logger,
+			&sidecarSpec.Resources)
+		sidecarSpec.VolumeMounts = volumeMounts
+
+		deploymentSpec.Template.Spec.Containers = append(deploymentSpec.Template.Spec.Containers, *sidecarSpec)
+	}
 }
 
 func (lc *lazyClient) resolveDeploymentStrategy(function *nuclioio.NuclioFunction) appsv1.DeploymentStrategyType {
@@ -1727,7 +1774,7 @@ func (lc *lazyClient) getPodAnnotations(function *nuclioio.NuclioFunction) (map[
 	// add annotations for prometheus pull
 	if lc.functionsHaveMetricSink(lc.platformConfigurationProvider.GetPlatformConfiguration(), "prometheusPull") {
 		annotations["nuclio.io/prometheus_pull"] = "true"
-		annotations["nuclio.io/prometheus_pull_port"] = strconv.Itoa(containerMetricPort)
+		annotations["nuclio.io/prometheus_pull_port"] = strconv.Itoa(abstract.FunctionContainerMetricPort)
 	}
 
 	// add function annotations
@@ -1735,9 +1782,10 @@ func (lc *lazyClient) getPodAnnotations(function *nuclioio.NuclioFunction) (map[
 		annotations[annotationKey] = annotationValue
 	}
 
-	// if a sidecar is defined, configure the processor container as default
-	if len(function.Spec.Sidecars) > 0 {
-		annotations["kubectl.kubernetes.io/default-container"] = client.FunctionContainerName
+	// set default container annotation if not exists, for logging purposes
+	defaultContainerAnnotation := "kubectl.kubernetes.io/default-container"
+	if _, ok := annotations[defaultContainerAnnotation]; !ok {
+		annotations[defaultContainerAnnotation] = client.FunctionContainerName
 	}
 
 	return annotations, nil
@@ -1822,7 +1870,9 @@ func (lc *lazyClient) populateServiceSpec(ctx context.Context,
 	spec *v1.ServiceSpec) {
 
 	if function.Status.State == functionconfig.FunctionStateScaledToZero ||
-		function.Status.State == functionconfig.FunctionStateWaitingForScaleResourcesToZero {
+		function.Status.State == functionconfig.FunctionStateWaitingForScaleResourcesToZero ||
+		// when scaling from zero we patch the service selector only after all other resources are ready
+		function.Status.State == functionconfig.FunctionStateWaitingForScaleResourcesFromZero {
 
 		// pass all further requests to DLX service
 		spec.Selector = map[string]string{common.NuclioLabelKeyApp: "dlx"}
@@ -1849,7 +1899,7 @@ func (lc *lazyClient) populateServiceSpec(ctx context.Context,
 
 		spec.Ports = []v1.ServicePort{
 			{
-				Name: ContainerHTTPPortName,
+				Name: abstract.FunctionContainerHTTPPortName,
 				Port: int32(abstract.FunctionContainerHTTPPort),
 			},
 		}
@@ -1864,6 +1914,22 @@ func (lc *lazyClient) populateServiceSpec(ctx context.Context,
 			"ports", spec.Ports)
 	}
 
+	// add additional ports for sidecars
+	if function.Spec.Sidecars != nil {
+		if len(spec.Ports) == 0 {
+			spec.Ports = []v1.ServicePort{}
+		}
+		for _, sidecar := range function.Spec.Sidecars {
+			for _, port := range sidecar.Ports {
+				spec.Ports = lc.addOrUpdatePort(spec.Ports, v1.ServicePort{
+					Name:       sidecar.Name,
+					Port:       port.ContainerPort,
+					TargetPort: intstr.FromInt32(port.ContainerPort),
+				})
+			}
+		}
+	}
+
 	// check if platform requires additional ports
 	platformServicePorts := lc.getServicePortsFromPlatform(lc.platformConfigurationProvider.GetPlatformConfiguration())
 
@@ -1871,13 +1937,29 @@ func (lc *lazyClient) populateServiceSpec(ctx context.Context,
 	spec.Ports = lc.ensureServicePortsExist(spec.Ports, platformServicePorts)
 }
 
+func (lc *lazyClient) addOrUpdatePort(ports []v1.ServicePort, port v1.ServicePort) []v1.ServicePort {
+	for i, existingPort := range ports {
+		if existingPort.Name == port.Name {
+			ports[i] = port
+			return ports
+		}
+
+		if existingPort.Port == port.Port {
+			ports[i] = port
+			return ports
+		}
+	}
+
+	return append(ports, port)
+}
+
 func (lc *lazyClient) getServicePortsFromPlatform(platformConfiguration *platformconfig.Config) []v1.ServicePort {
 	var servicePorts []v1.ServicePort
 
 	if lc.functionsHaveMetricSink(platformConfiguration, "prometheusPull") {
 		servicePorts = append(servicePorts, v1.ServicePort{
-			Name: containerMetricPortName,
-			Port: int32(containerMetricPort),
+			Name: abstract.FunctionContainerMetricPortName,
+			Port: int32(abstract.FunctionContainerMetricPort),
 		})
 	}
 
@@ -1979,8 +2061,14 @@ func (lc *lazyClient) generateCronTriggerCronJobSpec(ctx context.Context,
 		headersAsCurlArg = fmt.Sprintf("%s --header \"%s: %s\"", headersAsCurlArg, headerKey, headerValue)
 	}
 
-	// add default header
-	headersAsCurlArg = fmt.Sprintf("%s --header \"%s: %s\"", headersAsCurlArg, "x-nuclio-invoke-trigger", "cron")
+	// add default headers
+	headersAsCurlArg = fmt.Sprintf("%s --header \"%s: %s\" --header \"%s: %s\"",
+		headersAsCurlArg,
+		headers.InvokeTrigger,
+		"cron",
+		headers.TargetName,
+		function.Name,
+	)
 
 	functionAddress, err := lc.getCronTriggerInvocationURL(resources, function.Namespace)
 	if err != nil {
@@ -2037,7 +2125,7 @@ func (lc *lazyClient) generateCronTriggerCronJobSpec(ctx context.Context,
 						},
 					},
 					RestartPolicy:     v1.RestartPolicyNever,
-					NodeSelector:      function.Spec.NodeSelector,
+					NodeSelector:      function.Status.EnrichedNodeSelector,
 					NodeName:          function.Spec.NodeName,
 					Affinity:          function.Spec.Affinity,
 					PriorityClassName: function.Spec.PriorityClassName,
@@ -2202,10 +2290,15 @@ func (lc *lazyClient) addIngressToSpec(ctx context.Context,
 		"labels", functionLabels,
 		"host", ingress.Host,
 		"paths", ingress.Paths,
-		"TLS", ingress.TLS)
+		"TLS", ingress.TLS,
+		"IngressClassName", ingress.IngressClassName)
 
 	ingressRule := networkingv1.IngressRule{
 		Host: ingress.Host,
+	}
+
+	if ingress.IngressClassName != "" {
+		spec.IngressClassName = &ingress.IngressClassName
 	}
 
 	ingressRule.IngressRuleValue.HTTP = &networkingv1.HTTPIngressRuleValue{}
@@ -2229,7 +2322,7 @@ func (lc *lazyClient) addIngressToSpec(ctx context.Context,
 				Service: &networkingv1.IngressServiceBackend{
 					Name: kube.ServiceNameFromFunctionName(function.Name),
 					Port: networkingv1.ServiceBackendPort{
-						Name: ContainerHTTPPortName,
+						Name: abstract.FunctionContainerHTTPPortName,
 					},
 				},
 			},
@@ -2270,7 +2363,7 @@ func (lc *lazyClient) populateDeploymentContainer(ctx context.Context,
 	}
 	container.Ports = []v1.ContainerPort{
 		{
-			Name:          ContainerHTTPPortName,
+			Name:          abstract.FunctionContainerHTTPPortName,
 			ContainerPort: abstract.FunctionContainerHTTPPort,
 			Protocol:      v1.ProtocolTCP,
 		},
@@ -2279,8 +2372,8 @@ func (lc *lazyClient) populateDeploymentContainer(ctx context.Context,
 	// iterate through metric sinks. if prometheus pull is configured, add containerMetricPort
 	if lc.functionsHaveMetricSink(lc.platformConfigurationProvider.GetPlatformConfiguration(), "prometheusPull") {
 		container.Ports = append(container.Ports, v1.ContainerPort{
-			Name:          containerMetricPortName,
-			ContainerPort: containerMetricPort,
+			Name:          abstract.FunctionContainerMetricPortName,
+			ContainerPort: abstract.FunctionContainerMetricPort,
 			Protocol:      v1.ProtocolTCP,
 		})
 	}
@@ -2855,7 +2948,7 @@ func (lc *lazyClient) getMetricResourceByName(resourceName string) v1.ResourceNa
 
 func (lc *lazyClient) resolveFailFast(ctx context.Context,
 	podsList *v1.PodList,
-	functionResourcesCreateOrUpdateTimestamp time.Time) error {
+	functionResourcesCreateOrUpdateTimestamp time.Time) (functionconfig.FunctionState, error) {
 
 	var pods []v1.Pod
 	for _, pod := range podsList.Items {
@@ -2879,7 +2972,7 @@ func (lc *lazyClient) resolveFailFast(ctx context.Context,
 				// check if the pod is on a crashLoopBackoff
 				if containerStatus.State.Waiting.Reason == "CrashLoopBackOff" {
 
-					return errors.Errorf("NuclioFunction pod (%s) is in a crash loop", pod.Name)
+					return functionconfig.FunctionStateUnhealthy, errors.Errorf("NuclioFunction pod (%s) is in a crash loop", pod.Name)
 				}
 			}
 		}
@@ -2928,12 +3021,12 @@ func (lc *lazyClient) resolveFailFast(ctx context.Context,
 		}
 	}
 	if err := errGroup.Wait(); err != nil {
-		return errors.Wrap(err, "Failed to verify at least one pod schedulability")
+		return functionconfig.FunctionStateUnhealthy, errors.Wrap(err, "Failed to verify at least one pod schedulability")
 	}
 	if scaleUpOccurred {
 		lc.logger.DebugWithCtx(ctx, "Pod triggered a scale up. Still waiting for deployment to be available")
 	}
-	return nil
+	return "", nil
 }
 
 func (lc *lazyClient) isPodAutoScaledUp(ctx context.Context, pod v1.Pod) (bool, error) {
@@ -2985,6 +3078,10 @@ func (lc *lazyClient) enrichIngressWithDefaultValues(ingress *functionconfig.Ing
 	if ingress.TLS.SecretName == "" && platformConfig.IngressConfig.TLSSecret != "" {
 		ingress.TLS.Hosts = []string{ingress.Host}
 		ingress.TLS.SecretName = platformConfig.IngressConfig.TLSSecret
+	}
+
+	if ingress.IngressClassName == "" && platformConfig.Kube.DefaultHTTPIngressClassName != "" {
+		ingress.IngressClassName = platformConfig.Kube.DefaultHTTPIngressClassName
 	}
 
 	return nil

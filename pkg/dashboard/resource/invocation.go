@@ -62,10 +62,12 @@ func (tr *invocationResource) OnAfterInitialize() error {
 }
 
 func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, request *http.Request) {
+	trueString := "true"
 	ctx := request.Context()
 	path := request.Header.Get(headers.Path)
 	functionName := request.Header.Get(headers.FunctionName)
 	invokeURL := request.Header.Get(headers.InvokeURL)
+	sanitize := strings.ToLower(request.Header.Get(headers.SanitizeResponse)) == trueString
 
 	// get namespace from request or use the provided default
 	functionNamespace := tr.getNamespaceOrDefault(request.Header.Get(headers.FunctionNamespace))
@@ -92,7 +94,7 @@ func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, 
 		tr.writeErrorMessage(responseWriter, errors.RootCause(err).Error())
 	}
 
-	skipTLSVerification := strings.ToLower(request.Header.Get(headers.SkipTLSVerification)) == "true"
+	skipTLSVerification := strings.ToLower(request.Header.Get(headers.SkipTLSVerification)) == trueString
 
 	// resolve the function host
 	invocationResult, err := tr.getPlatform().CreateFunctionInvocation(ctx, &platform.CreateFunctionInvocationOptions{
@@ -131,8 +133,13 @@ func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, 
 		}
 	}
 
+	body := invocationResult.Body
+	if sanitize {
+		body = common.SanitizeResponseData(invocationResult.Body, invocationResult.Headers)
+	}
+
 	responseWriter.WriteHeader(invocationResult.StatusCode)
-	responseWriter.Write(invocationResult.Body) // nolint: errcheck
+	responseWriter.Write(body) // nolint: errcheck
 }
 
 func (tr *invocationResource) writeErrorHeader(responseWriter http.ResponseWriter, statusCode int) {

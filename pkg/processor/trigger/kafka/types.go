@@ -45,7 +45,7 @@ type Configuration struct {
 	BalanceStrategy string
 	SASL            struct {
 		Enable    bool
-		Handshake bool
+		Handshake *bool
 		User      string
 		Password  string
 		Mechanism string
@@ -155,7 +155,7 @@ func NewConfiguration(id string,
 		{Key: "nuclio.io/kafka-sasl-user", ValueString: &newConfiguration.SASL.User},
 		{Key: "nuclio.io/kafka-sasl-password", ValueString: &newConfiguration.SASL.Password},
 		{Key: "nuclio.io/kafka-sasl-mechanism", ValueString: &newConfiguration.SASL.Mechanism},
-		{Key: "nuclio.io/kafka-sasl-handshake", ValueBool: &newConfiguration.SASL.Handshake},
+		{Key: "nuclio.io/kafka-sasl-handshake", ValueBool: newConfiguration.SASL.Handshake},
 
 		// sasl.oauth
 		{Key: "nuclio.io/kafka-sasl-oauth-client-id", ValueString: &newConfiguration.SASL.OAuth.ClientID},
@@ -184,7 +184,9 @@ func NewConfiguration(id string,
 		return nil, errors.Wrap(err, "Failed to populate configuration from secrets")
 	}
 
-	if err := newConfiguration.PopulateExplicitAckMode(explicitAckModeValue,
+	if err := newConfiguration.PopulateExplicitAckMode(
+		logger,
+		explicitAckModeValue,
 		triggerConfiguration.ExplicitAckMode); err != nil {
 		return nil, errors.Wrap(err, "Failed to populate explicit ack mode")
 	}
@@ -220,8 +222,8 @@ func NewConfiguration(id string,
 	}
 
 	// set default
-	if triggerConfiguration.MaxWorkers == 0 {
-		triggerConfiguration.MaxWorkers = 32
+	if triggerConfiguration.NumWorkers == 0 {
+		triggerConfiguration.NumWorkers = 32
 	}
 
 	// parse attributes

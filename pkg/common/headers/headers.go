@@ -27,11 +27,13 @@ const (
 	FunctionNamespace                   = "X-Nuclio-Function-Namespace"
 	WaitFunctionAction                  = "X-Nuclio-Wait-Function-Action"
 	DeleteFunctionIgnoreStateValidation = "X-Nuclio-Delete-Function-Ignore-State-Validation"
+	DeleteFunctionWithAPIGateways       = "X-Nuclio-Delete-Function-With-API-Gateways"
 	CreationStateUpdatedTimeout         = "X-Nuclio-Creation-State-Updated-Timeout"
 	FunctionEnrichApiGateways           = "X-Nuclio-Function-Enrich-Apigateways"
 	ImportedFunctionOnly                = "X-Nuclio-Imported-Function-Only"
 	SkipSpecCleanup                     = "X-Nuclio-Skip-Spec-Cleanup"
 	VerifyExternalRegistry              = "X-Nuclio-Verify-External-Registry"
+	AutofixFunctionConfiguration        = "X-Nuclio-Autofix-Function-Configuration"
 
 	// Project headers
 	ProjectName           = "X-Nuclio-Project-Name"
@@ -43,9 +45,11 @@ const (
 	InvokeURL           = "X-Nuclio-Invoke-Url"
 	InvokeTimeout       = "X-Nuclio-Invoke-Timeout"
 	InvokeVia           = "X-Nuclio-Invoke-Via"
+	InvokeTrigger       = "X-Nuclio-Invoke-Trigger"
 	SkipTLSVerification = "X-Nuclio-Skip-Tls-Verification"
 	Path                = "X-Nuclio-Path"
 	LogLevel            = "X-Nuclio-Log-Level"
+	SanitizeResponse    = "X-Nuclio-Sanitize-Response"
 
 	// ApiGateway headers
 	ApiGatewayName                      = "X-Nuclio-Api-Gateway-Name"

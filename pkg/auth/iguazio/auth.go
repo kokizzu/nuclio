@@ -38,8 +38,9 @@ import (
 )
 
 const (
-	IguzioUsernameLabel                          string = "iguazio.com/username"
-	IguzioVerificationAndDataEnrichmentURLSuffix string = "_enrich_data"
+	IguazioUsernameLabel                          string = "iguazio.com/username"
+	IguazioDomainLabel                            string = "iguazio.com/domain"
+	IguazioVerificationAndDataEnrichmentURLSuffix string = "_enrich_data"
 )
 
 type Auth struct {
@@ -56,7 +57,7 @@ func NewAuth(logger logger.Logger, config *authpkg.Config) authpkg.Auth {
 		httpClient: &http.Client{
 			Timeout: config.Iguazio.Timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.Iguazio.SkipTLSVerification},
 			},
 		},
 		cache: cache.NewLRUExpireCache(config.Iguazio.CacheSize),

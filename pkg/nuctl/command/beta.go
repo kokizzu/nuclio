@@ -44,12 +44,11 @@ func newBetaCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *bet
 
 	cmd := &cobra.Command{
 		Use:   "beta",
-		Short: "A beta version of nuctl as a Nuclio api cli client",
+		Short: "A beta version of nuctl as a Nuclio api CLI client",
 	}
 
 	cmd.PersistentFlags().StringVar(&commandeer.apiURL, "api-url", "", "URL of the nuclio API (e.g. https://nuclio.io:8070)")
 	cmd.PersistentFlags().StringVar(&commandeer.username, "username", "", "Username of a user with permissions to the nuclio API")
-	cmd.PersistentFlags().StringVar(&commandeer.accessKey, "password", "", "Access Key of a user with permissions to the nuclio API [Deprecated: use --access-key]")
 	cmd.PersistentFlags().StringVar(&commandeer.accessKey, "access-key", "", "Access Key of a user with permissions to the nuclio API")
 	cmd.PersistentFlags().StringVar(&commandeer.requestTimeout, "request-timeout", "60s", "Request timeout")
 	cmd.PersistentFlags().BoolVar(&commandeer.skipTLSVerify, "skip-tls-verify", false, "Skip TLS verification")
@@ -69,7 +68,7 @@ func (b *betaCommandeer) initialize() error {
 	var err error
 
 	// initialize root
-	if err := b.rootCommandeer.initialize(); err != nil {
+	if err := b.rootCommandeer.initialize(true); err != nil {
 		return errors.Wrap(err, "Failed to initialize root")
 	}
 

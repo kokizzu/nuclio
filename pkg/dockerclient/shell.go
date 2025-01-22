@@ -109,7 +109,7 @@ func (c *ShellClient) Build(buildOptions *BuildOptions) error {
 
 	buildArgs := ""
 	for buildFlag := range buildOptions.BuildFlags {
-		buildArgs += fmt.Sprintf(buildFlag + " ")
+		buildArgs += fmt.Sprintf("%s ", buildFlag)
 	}
 	for buildArgName, buildArgValue := range buildOptions.BuildArgs {
 		buildArgs += fmt.Sprintf("--build-arg %s=%s ", buildArgName, buildArgValue)
@@ -146,6 +146,38 @@ func (c *ShellClient) CopyObjectsFromImage(imageName string,
 			objectImagePath,
 			objectLocalPath); err != nil && !allowCopyErrors {
 			return errors.Wrapf(err, "Can't copy %s:%s -> %s", containerID, objectImagePath, objectLocalPath)
+		}
+	}
+
+	return nil
+}
+
+// CopyObjectsToContainer copies objects (files, directories) from a local storage to a container
+// objectToCopy is a map where keys are local storage path and values are container paths
+func (c *ShellClient) CopyObjectsToContainer(containerName string, objectsToCopy map[string]string) error {
+
+	// copy objects
+	for objectLocalPath, objectContainerPath := range objectsToCopy {
+
+		// create target directory if it doesn't exist
+		fileDir := path.Dir(objectContainerPath)
+
+		// escape all paths (security matter)
+		escapedObjectLocalPath := common.Quote(objectLocalPath)
+		escapedObjectContainerPath := common.Quote(objectContainerPath)
+		escapedFileDir := common.Quote(fileDir)
+
+		if _, err := c.runCommand(nil, "docker exec %s mkdir -p %s", containerName, escapedFileDir); err != nil {
+			return errors.Wrapf(err, "Failed creating directory in container")
+		}
+
+		// copy an object from local storage to the given container
+		if _, err := c.runCommand(nil,
+			"docker cp %s %s:%s ",
+			escapedObjectLocalPath,
+			containerName,
+			escapedObjectContainerPath); err != nil {
+			return errors.Wrapf(err, "Failed copying object %s to container %s:%s", escapedObjectLocalPath, containerName, escapedObjectContainerPath)
 		}
 	}
 
@@ -215,9 +247,12 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 	var dockerArguments []string
 
 	for localPort, dockerPort := range runOptions.Ports {
-		if localPort == RunOptionsNoPort {
+		switch localPort {
+		case RunOptionsRandomPort:
 			dockerArguments = append(dockerArguments, fmt.Sprintf("--publish '%d'", dockerPort))
-		} else {
+		case RunOptionsNoPort:
+			continue
+		default:
 			dockerArguments = append(dockerArguments, fmt.Sprintf("--publish '%d:%d'", localPort, dockerPort))
 		}
 	}
@@ -763,7 +798,11 @@ func (c *ShellClient) CreateVolume(options *CreateVolumeOptions) error {
 func (c *ShellClient) DeleteVolume(volumeName string) error {
 	c.logger.DebugWith("Deleting docker volume", "volumeName", volumeName)
 	if !volumeNameRegex.MatchString(volumeName) {
-		return errors.New("Invalid volume name to delete")
+		// if a name doesn't match regexp, volume was not created in the first place,
+		// so we don't want to fail in that case, just do nothing
+		c.logger.WarnWith("Failed to validate volume name, deletion of volume was skipped",
+			"volumeName", volumeName)
+		return nil
 	}
 
 	_, err := c.runCommand(nil, `docker volume rm --force %s`, volumeName)
@@ -973,7 +1012,7 @@ func (c *ShellClient) build(buildOptions *BuildOptions, buildArgs string) error 
 		c.buildRetryInterval,
 		retryOnErrorMessages,
 		func(int) (string, error) {
-			runResults, err := c.runCommand(runOptions, buildCommand)
+			runResults, err := c.runCommand(runOptions, "%s", buildCommand)
 
 			// preserve error
 			lastBuildErr = err

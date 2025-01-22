@@ -70,7 +70,8 @@ func (suite *testSuite) TestPostEvent() {
 			suite.topicName: {NumMessages: 20},
 		},
 		nil,
-		suite.publishMessageToTopic)
+		suite.publishMessageToTopic,
+		nil)
 }
 
 func (suite *testSuite) getDeployOptions() *platform.CreateFunctionOptions {
@@ -86,7 +87,7 @@ func (suite *testSuite) getDeployOptions() *platform.CreateFunctionOptions {
 		Attributes: map[string]interface{}{
 			"topic": suite.topicName,
 		},
-		MaxWorkers: 3,
+		NumWorkers: 3,
 	}
 
 	return createFunctionOptions

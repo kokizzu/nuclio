@@ -24,6 +24,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/build/runtime"
 
 	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
 	"k8s.io/api/core/v1"
 )
 
@@ -52,6 +53,8 @@ type BuildOptions struct {
 	FunctionServiceAccount  string
 	BuilderServiceAccount   string
 	SecurityContext         *v1.PodSecurityContext
+
+	BuildLogger logger.Logger
 }
 
 type ContainerBuilderConfiguration struct {
@@ -90,7 +93,7 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 	}
 	if containerBuilderConfiguration.AWSCLIImage == "" {
 		containerBuilderConfiguration.AWSCLIImage = common.GetEnvOrDefaultString("NUCLIO_AWS_CLI_CONTAINER_IMAGE",
-			"amazon/aws-cli:2.7.10")
+			"amazon/aws-cli:2.17.16")
 	}
 	if containerBuilderConfiguration.RegistryProviderSecretName == "" {
 		containerBuilderConfiguration.RegistryProviderSecretName = common.GetEnvOrDefaultString("NUCLIO_KANIKO_REGISTRY_PROVIDER_AUTH_SECRET_NAME",
@@ -98,7 +101,7 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 	}
 	if containerBuilderConfiguration.KanikoImage == "" {
 		containerBuilderConfiguration.KanikoImage = common.GetEnvOrDefaultString("NUCLIO_KANIKO_CONTAINER_IMAGE",
-			"gcr.io/kaniko-project/executor:v1.9.0")
+			"gcr.io/kaniko-project/executor:v1.23.2")
 	}
 	if containerBuilderConfiguration.KanikoImagePullPolicy == "" {
 		containerBuilderConfiguration.KanikoImagePullPolicy = common.GetEnvOrDefaultString(

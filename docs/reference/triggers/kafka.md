@@ -82,10 +82,6 @@ For more information on Nuclio function configuration, see the [function-configu
   <br/>
   **Type:** `[]string`
 
-- <a id="partitions"></a>**`partitions`** - A list of partitions for which the function receives events.
-  <br/>
-  **Type:** `[]int`
-
 - <a id="consumerGroup"></a>**`consumerGroup`** - The name of the Kafka consumer group to use.
   <br/>
   **Type:** `string`
@@ -109,7 +105,7 @@ For more information on Nuclio function configuration, see the [function-configu
   - **`handshake`** (`bool`) - Whether to send Kafka SASL handshake first. (default to: `true`)
   - **`user`** (`string`) - Username to be used for authentication.
   - **`password`** (`string`) - Password to be used for authentication.
-  - **`mechanism`** (`string`) - Name of SASL mechanism to use for authentication. (default to: `plain`, see [here](https://github.com/Shopify/sarama/blob/f16c9d8fbe4866c970b20a08be14d57553b0b660/broker.go#L62) for options)
+  - **`mechanism`** (`string`) - Name of SASL mechanism to use for authentication. (default to: `plain`, see [here](https://pkg.go.dev/github.com/Shopify/sarama#SASLMechanism) for options)
     > `GSSAPI` is yet to be supported by Nuclio. (read: Kerberos)
 
   - <a id="sasl.oauth"></a>**`sasl.oauth`** - SASL OAuth configuration object.
@@ -186,7 +182,7 @@ The current configurations supported via secrets are: `accessKey`, `accessCertif
 <a id="message-course"></a>
 ## How a message travels through Nuclio to the handler
 
-Nuclio leverages the [Sarama](https://pkg.go.dev/github.com/Shopify/sarama?tab=doc) Go client library (`sarama`) to read from Kafka. This library takes care of reading messages from Kafka partitions and distributing them to a consumer - in this case, the Nuclio trigger. A Nuclio replica has exactly one instance of Sarama and one instance of the Nuclio trigger for each Kafka trigger configured for the Nuclio function.
+Nuclio leverages the [Sarama](https://pkg.go.dev/github.com/Shopify/sarama) Go client library (`sarama`) to read from Kafka. This library takes care of reading messages from Kafka partitions and distributing them to a consumer - in this case, the Nuclio trigger. A Nuclio replica has exactly one instance of Sarama and one instance of the Nuclio trigger for each Kafka trigger configured for the Nuclio function.
 
 Upon its creation, the Nuclio trigger configures Sarama to start reading messages from a given broker, topics, or consumer group. At this point, Sarama calculates which partitions the Nuclio replica must handle, communicates the results to the Nuclio trigger, and then starts dispatching messages.
 
@@ -202,7 +198,7 @@ The Nuclio trigger reads directly from this partition consumer queue (remember t
 
 <a id="message-course-config-params"></a>
 ### Configuration parameters
-<!-- See https://pkg.go.dev/github.com/Shopify/sarama?tab=doc /
+<!-- See https://pkg.go.dev/github.com/Shopify/sarama /
   vendor/github.com/Shopify/sarama/config.go, and
   https://kafka.apache.org/documentation/#consumerconfigs + types and default
   values in pkg/processor/trigger/kafka/types.go. -->
@@ -280,8 +276,8 @@ For that, Nuclio offers a way to accept new events without committing them, and 
 This enables the function to receive and process more events simultaneously.
 
 To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enable` or `explicitOnly`, where the optional modes are:
-* `enable` - allows explicit and implicit ack according to the "x-nuclio-stream-no-ack" header
-* `disable`- disables the explicit ack feature and allows only implicit acks (default)
+* `enable` - allows explicit and implicit ACK according to the "x-nuclio-stream-no-ack" header
+* `disable`- disables the explicit ACK feature and allows only implicit acks (default)
 * `explicitOnly`- allows only explicit acks and disables implicit acks
 
 To receive more events without committing them, your function handler must respond with a nuclio response object, set the `x-nuclio-stream-no-ack` header to `true` in the request.
@@ -313,7 +309,7 @@ Default value is `100ms`. It can be also set via function annotation `nuclio.io/
 
 
 **NOTES**:
-* Currently, the explicit ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
+* Currently, the Explicit Ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
 * The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/kafka-worker-allocation-mode":"static"`.
 * The `QualifiedOffset` object can be saved in a persistent storage and used to commit the offset on later invocation of the function.
 
@@ -342,7 +338,7 @@ This aggressive termination helps the consumer groups stabilize in a determinist
 
 <a id="rebalancing-config-params"></a>
 ### Configuration parameters
-<!-- See https://pkg.go.dev/github.com/Shopify/sarama?tab=doc /
+<!-- See https://pkg.go.dev/github.com/Shopify/sarama /
   vendor/github.com/Shopify/sarama/config.go, and
   https://kafka.apache.org/documentation/#consumerconfigs + types and default
   values in pkg/processor/trigger/kafka/types.go. -->
@@ -435,4 +431,10 @@ triggers:
         insecureSkipVerify: true
         minVersion: "1.2"
 ```
+
+### Troubleshooting
+
+* Timeout during rebalance
+Issue: `Panic caught while trying to write into channel, which was closed because of wait for rebalance timeout` (log example)
+Solution: This issue can be resolved by increasing the `trigger.<name>.workerTerminationTimeout`. For more details, refer to the [function configuration documentation](../function-configuration/function-configuration-reference).
 

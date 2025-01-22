@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
@@ -47,7 +49,6 @@ type NuclioAPIClient struct {
 	requestTimeout string
 	username       string
 	accessKey      string
-	skipTLSVerify  bool
 	authHeaders    map[string]string
 }
 
@@ -71,13 +72,27 @@ func NewNuclioAPIClient(parentLogger logger.Logger,
 		return nil, errors.New("Access key must be provided")
 	}
 
+	// ensure that apiURL is a correct URL
+	baseURL, err := url.Parse(apiURL)
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("Failed to parse API URL: %s", apiURL))
+	}
+
+	// ensure that API URL contains the /api suffix
+	if !strings.HasSuffix(baseURL.Path, "api") && !strings.HasSuffix(baseURL.Path, "api/") {
+		parentLogger.InfoWith("Adding `api` suffix to API URL",
+			"apiURL", apiURL)
+		if apiURL, err = url.JoinPath(apiURL, "api"); err != nil {
+			return nil, errors.Wrap(err, "Failed to add `api` suffix to API URL")
+		}
+	}
+
 	newAPIClient := &NuclioAPIClient{
 		logger:         parentLogger.GetChild("api-client"),
 		apiURL:         apiURL,
 		requestTimeout: requestTimeout,
 		username:       username,
 		accessKey:      accessKey,
-		skipTLSVerify:  skipTLSVerify,
 	}
 
 	// parse the request timeout
@@ -95,7 +110,7 @@ func NewNuclioAPIClient(parentLogger logger.Logger,
 	}
 	if skipTLSVerify {
 		newAPIClient.httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLSVerify},
 		}
 	}
 
@@ -178,7 +193,7 @@ func (c *NuclioAPIClient) PatchFunction(ctx context.Context,
 		false); err != nil {
 		switch typedError := err.(type) {
 		case *nuclio.ErrorWithStatusCode:
-			return nuclio.GetWrapByStatusCode(typedError.StatusCode())(errors.Wrap(err, "Failed to send patch API request"))
+			return nuclio.GetWrapByStatusCode(typedError.StatusCode())(typedError.GetError())
 		default:
 			return errors.Wrap(typedError, "Failed to send patch API request")
 		}
@@ -224,26 +239,51 @@ func (c *NuclioAPIClient) sendRequest(ctx context.Context,
 	}
 
 	if response.StatusCode != expectedStatusCode {
-		return nil, nil, nuclio.GetByStatusCode(response.StatusCode)(fmt.Sprintf("Expected status code %d, got %d", expectedStatusCode, response.StatusCode))
+		reason := ""
+		message := fmt.Sprintf("Expected status code %d, got %d", expectedStatusCode, response.StatusCode)
+
+		// try to extract the error message from the response, ignore it if it fails
+		decodedResponseBody, err := c.decodeResponseBody(response)
+		if err == nil {
+			if errString, ok := decodedResponseBody["error"].(string); ok {
+				reason = errString
+				message = fmt.Sprintf("%s: %s", message, errString)
+			}
+		}
+
+		c.logger.WarnWithCtx(ctx,
+			"Received unexpected status code",
+			"statusCode", response.StatusCode,
+			"reason", reason)
+		return nil, nil, nuclio.GetByStatusCode(response.StatusCode)(message)
 	}
 
 	if !returnResponseBody {
 		return response, nil, nil
 	}
 
+	// extract the response message
+	decodedResponseBody, err := c.decodeResponseBody(response)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "Failed to decode response body")
+	}
+
+	return response, decodedResponseBody, nil
+}
+
+func (c *NuclioAPIClient) decodeResponseBody(response *http.Response) (map[string]interface{}, error) {
 	encodedResponseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to read response body")
+		return nil, errors.Wrap(err, "Failed to read response body")
 	}
 
 	defer response.Body.Close() // nolint: errcheck
 
 	decodedResponseBody := map[string]interface{}{}
 	if err := json.Unmarshal(encodedResponseBody, &decodedResponseBody); err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to decode response body")
+		return nil, errors.Wrap(err, "Failed to decode response body")
 	}
-
-	return response, decodedResponseBody, nil
+	return decodedResponseBody, nil
 }
 
 // createAuthorizationHeaders creates authorization headers for the nuclio API

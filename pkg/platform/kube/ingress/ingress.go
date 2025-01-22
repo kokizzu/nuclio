@@ -34,7 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// keeps resources needed for ingress creation
+// Resources keeps resources needed for ingress creation
 // (BasicAuthSecret is used when it is an ingress with basic-auth authentication)
 type Resources struct {
 	Ingress         *networkingv1.Ingress
@@ -70,6 +70,14 @@ func (m *Manager) GenerateResources(ctx context.Context,
 		return nil, errors.Wrap(err, "Failed to compile ingress annotations")
 	}
 
+	if spec.IngressClassName == "" {
+		if m.platformConfiguration.Kube.DefaultHTTPIngressClassName != "" {
+			spec.IngressClassName = m.platformConfiguration.Kube.DefaultHTTPIngressClassName
+		} else {
+			spec.IngressClassName = platformconfig.DefaultHTTPIngressClassName
+		}
+	}
+
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.Name,
@@ -78,6 +86,7 @@ func (m *Manager) GenerateResources(ctx context.Context,
 			Labels:      spec.Labels,
 		},
 		Spec: networkingv1.IngressSpec{
+			IngressClassName: &spec.IngressClassName,
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: spec.Host,
@@ -295,9 +304,7 @@ func (m *Manager) compileAnnotations(ctx context.Context, spec Spec) (map[string
 	var err error
 	var basicAuthSecret *v1.Secret
 
-	ingressAnnotations := map[string]string{
-		"kubernetes.io/ingress.class": "nginx",
-	}
+	ingressAnnotations := map[string]string{}
 	if spec.RewriteTarget != "" {
 		ingressAnnotations["nginx.ingress.kubernetes.io/rewrite-target"] = spec.RewriteTarget
 	}
@@ -333,10 +340,12 @@ func (m *Manager) compileAnnotations(ctx context.Context, spec Spec) (map[string
 			enableSSLRedirect = *spec.EnableSSLRedirect
 		}
 
+		// if SSL redirect is enabled, set the annotation to true, otherwise set it to false unless it's already set
+		SSLRedirectAnnotation := "nginx.ingress.kubernetes.io/ssl-redirect"
 		if enableSSLRedirect {
-			ingressAnnotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "true"
-		} else {
-			ingressAnnotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "false"
+			ingressAnnotations[SSLRedirectAnnotation] = "true"
+		} else if _, ok := ingressAnnotations[SSLRedirectAnnotation]; !ok {
+			ingressAnnotations[SSLRedirectAnnotation] = "false"
 		}
 	}
 

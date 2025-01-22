@@ -59,3 +59,7 @@ const (
 const RestoreConfigFromSecretEnvVar = "NUCLIO_RESTORE_FUNCTION_CONFIG_FROM_SECRET"
 
 const FunctionConfigFileName = "function.yaml"
+
+const DefaultIngressHostTemplate = "@nuclio.fromDefault"
+
+const FunctionTagLatest = "latest"
